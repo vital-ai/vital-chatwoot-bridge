@@ -1,0 +1,52 @@
+{
+  "serviceName": "vital-chatwoot-bridge",
+  "cluster": "CLUSTER_NAME",
+  "taskDefinition": "vital-chatwoot-bridge:REVISION",
+  "desiredCount": 1,
+  "launchType": "FARGATE",
+  "platformVersion": "LATEST",
+  "networkConfiguration": {
+    "awsvpcConfiguration": {
+      "subnets": [
+        "subnet-XXXXXXXXX",
+        "subnet-YYYYYYYYY"
+      ],
+      "securityGroups": [
+        "sg-XXXXXXXXX"
+      ],
+      "assignPublicIp": "ENABLED"
+    }
+  },
+  "loadBalancers": [
+    {
+      "targetGroupArn": "arn:aws:elasticloadbalancing:REGION:ACCOUNT_ID:targetgroup/vital-chatwoot-bridge/XXXXXXXXX",
+      "containerName": "vital-chatwoot-bridge",
+      "containerPort": 8000
+    }
+  ],
+  "serviceRegistries": [],
+  "deploymentConfiguration": {
+    "maximumPercent": 200,
+    "minimumHealthyPercent": 50,
+    "deploymentCircuitBreaker": {
+      "enable": true,
+      "rollback": true
+    }
+  },
+  "enableExecuteCommand": false,
+  "enableLogging": true,
+  "tags": [
+    {
+      "key": "Environment",
+      "value": "production"
+    },
+    {
+      "key": "Service",
+      "value": "vital-chatwoot-bridge"
+    },
+    {
+      "key": "Project",
+      "value": "vital-ai"
+    }
+  ]
+}

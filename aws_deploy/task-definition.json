@@ -1,0 +1,66 @@
+{
+  "family": "vital-chatwoot-bridge",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/vital-chatwoot-bridge-task-role",
+  "containerDefinitions": [
+    {
+      "name": "vital-chatwoot-bridge",
+      "image": "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/vital-chatwoot-bridge:latest",
+      "portMappings": [
+        {
+          "containerPort": 8000,
+          "protocol": "tcp"
+        }
+      ],
+      "essential": true,
+      "environment": [
+        {
+          "name": "PORT",
+          "value": "8000"
+        },
+        {
+          "name": "HOST",
+          "value": "0.0.0.0"
+        },
+        {
+          "name": "DEBUG",
+          "value": "false"
+        },
+        {
+          "name": "ENVIRONMENT",
+          "value": "production"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "CHATWOOT_BASE_URL",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/chatwoot-base-url-XXXXXX"
+        },
+        {
+          "name": "CHATWOOT_API_ACCESS_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/chatwoot-api-token-XXXXXX"
+        },
+        {
+          "name": "CHATWOOT_ACCOUNT_ID",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/chatwoot-account-id-XXXXXX"
+        },
+        {
+          "name": "INBOX_AGENT_MAPPINGS",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/inbox-agent-mappings-XXXXXX"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/vital-chatwoot-bridge",
+          "awslogs-region": "REGION",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}

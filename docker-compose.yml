@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  vital-chatwoot-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vital-chatwoot-bridge
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      - DEBUG=false
+      - HOST=0.0.0.0
+      # Chatwoot configuration
+      - CHATWOOT_BASE_URL=${CHATWOOT_BASE_URL:-}
+      - CHATWOOT_API_TOKEN=${CHATWOOT_API_TOKEN:-}
+      # Vital AI configuration
+      - VITAL_AI_BASE_URL=${VITAL_AI_BASE_URL:-}
+      - VITAL_AI_API_TOKEN=${VITAL_AI_API_TOKEN:-}
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - vital-bridge-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  vital-bridge-network:
+    driver: bridge

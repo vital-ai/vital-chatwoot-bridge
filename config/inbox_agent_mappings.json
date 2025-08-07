@@ -1,0 +1,32 @@
+[
+  {
+    "inbox_id": "1",
+    "agent_config": {
+      "agent_id": "agent_1",
+      "websocket_url": "ws://localhost:8085",
+      "send_welcome_message": false,
+      "response_timeout": 30,
+      "max_retries": 3
+    }
+  },
+  {
+    "inbox_id": "2",
+    "agent_config": {
+      "agent_id": "agent_2",
+      "websocket_url": "ws://localhost:8086",
+      "send_welcome_message": false,
+      "response_timeout": 45,
+      "max_retries": 2
+    }
+  },
+  {
+    "inbox_id": "3",
+    "agent_config": {
+      "agent_id": "agent_3",
+      "websocket_url": "ws://localhost:8087",
+      "send_welcome_message": false,
+      "response_timeout": 30,
+      "max_retries": 3
+    }
+  }
+]
