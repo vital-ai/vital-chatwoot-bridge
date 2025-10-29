@@ -42,7 +42,17 @@ class Config:
         # Chatwoot API Configuration
         self.chatwoot_base_url = os.getenv('CHATWOOT_BASE_URL', '')
         self.chatwoot_api_access_token = os.getenv('CHATWOOT_API_ACCESS_TOKEN', '')
-        self.chatwoot_account_id = int(os.getenv('CHATWOOT_ACCOUNT_ID', '1'))
+        self.chatwoot_account_id = os.getenv('CHATWOOT_ACCOUNT_ID', '1')
+        self.chatwoot_bot_webhook_secret = os.getenv('CHATWOOT_BOT_WEBHOOK_SECRET', '')
+        self.enforce_webhook_signatures = os.getenv('ENFORCE_WEBHOOK_SIGNATURES', 'true').lower() == 'true'
+        
+        # Keycloak Configuration for JWT tokens
+        self.keycloak_realm = os.getenv('KEYCLOAK_REALM', '')
+        self.keycloak_client_id = os.getenv('KEYCLOAK_CLIENT_ID', '')
+        self.keycloak_client_secret = os.getenv('KEYCLOAK_CLIENT_SECRET', '')
+        self.keycloak_user = os.getenv('KEYCLOAK_USER', '')
+        self.keycloak_password = os.getenv('KEYCLOAK_PASSWORD', '')
+        self.keycloak_base_url = os.getenv('KEYCLOAK_BASE_URL', 'http://localhost:8085')
         
         # Response Configuration
         self.default_response_timeout = int(os.getenv('DEFAULT_RESPONSE_TIMEOUT', '30'))

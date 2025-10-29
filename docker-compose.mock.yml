@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  vital-chatwoot-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vital-chatwoot-bridge
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      - DEBUG=false
+      - HOST=0.0.0.0
+      # Chatwoot configuration
+      - CHATWOOT_BASE_URL=${CHATWOOT_BASE_URL:-}
+      - CHATWOOT_API_ACCESS_TOKEN=${CHATWOOT_API_ACCESS_TOKEN:-}
+      # Vital AI configuration
+      - VITAL_AI_BASE_URL=${VITAL_AI_BASE_URL:-}
+      - VITAL_AI_API_TOKEN=${VITAL_AI_API_TOKEN:-}
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - vital-bridge-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Mock AI Agents
+  mock-agent-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mock-agent-1
+    ports:
+      - "8091:8091"
+    command: ["python", "-m", "vital_chatwoot_bridge.agents.mock_agent", "0.0.0.0", "8091", "echo"]
+    restart: unless-stopped
+
+  mock-agent-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mock-agent-2
+    ports:
+      - "8092:8092"
+    command: ["python", "-m", "vital_chatwoot_bridge.agents.mock_agent", "0.0.0.0", "8092", "test"]
+    restart: unless-stopped
+
+  mock-agent-3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mock-agent-3
+    ports:
+      - "8093:8093"
+    command: ["python", "-m", "vital_chatwoot_bridge.agents.mock_agent", "0.0.0.0", "8093", "delay"]
+    restart: unless-stopped
+
+networks:
+  vital-bridge-network:
+    driver: bridge

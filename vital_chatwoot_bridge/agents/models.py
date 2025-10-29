@@ -38,7 +38,7 @@ class AgentChatRequest(BaseModel):
     """Chat request sent to AI agent via WebSocket."""
     message_id: str = Field(..., description="Unique message ID for correlation")
     inbox_id: str = Field(..., description="Chatwoot inbox identifier")
-    conversation_id: str = Field(..., description="Chatwoot conversation ID")
+    conversation_id: int = Field(..., description="Chatwoot conversation ID")
     content: str = Field(..., description="Customer message content")
     sender: Dict[str, Any] = Field(..., description="Message sender information")
     context: Dict[str, Any] = Field(default_factory=dict, description="Message context")
@@ -50,7 +50,7 @@ class AgentChatResponse(BaseModel):
     """Chat response received from AI agent via WebSocket."""
     message_id: str = Field(..., description="Correlation ID matching original request")
     inbox_id: str = Field(..., description="Target inbox for routing")
-    conversation_id: str = Field(..., description="Target conversation ID")
+    conversation_id: int = Field(..., description="Target conversation ID")
     content: str = Field(..., description="AI response content")
     response_type: ResponseMode = Field(..., description="Response handling mode")
     metadata: Optional[AgentResponseMetadata] = Field(None, description="Response metadata")

@@ -3,6 +3,7 @@ Main entry point for the Vital Chatwoot Bridge FastAPI application.
 """
 
 import asyncio
+import json
 import logging
 import os
 import uvicorn
@@ -19,8 +20,8 @@ load_dotenv()
 from vital_chatwoot_bridge.core.config import get_settings
 from vital_chatwoot_bridge.api.routes import health_router
 from vital_chatwoot_bridge.handlers.webhook_handler import WebhookHandler
-from vital_chatwoot_bridge.agents.websocket_manager import WebSocketManager
 from vital_chatwoot_bridge.chatwoot.api_client import get_chatwoot_client, close_chatwoot_client
+from vital_chatwoot_bridge.utils.webhook_security import verify_webhook_signature, log_webhook_headers
 
 # Configure logging using centralized utility
 from vital_chatwoot_bridge.utils.logging_config import get_logger
@@ -29,27 +30,22 @@ logger = get_logger(__name__)
 settings = get_settings()
 
 # Global instances
-websocket_manager: WebSocketManager = None
 webhook_handler: WebhookHandler = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
-    global websocket_manager, webhook_handler
+    global webhook_handler
     
     logger.info("Starting Vital Chatwoot Bridge...")
     
     try:
-        # Initialize WebSocket manager
-        websocket_manager = WebSocketManager()
-        await websocket_manager.start()
-        
         # Initialize Chatwoot API client
         chatwoot_client = await get_chatwoot_client()
         
-        # Initialize webhook handler
-        webhook_handler = WebhookHandler(websocket_manager, chatwoot_client)
+        # Initialize webhook handler (now uses per-message WebSocket client)
+        webhook_handler = WebhookHandler(chatwoot_client)
         
         # Health check
         api_healthy = await chatwoot_client.health_check()
@@ -66,9 +62,6 @@ async def lifespan(app: FastAPI):
         logger.info("Shutting down Vital Chatwoot Bridge...")
         
         # Cleanup
-        if websocket_manager:
-            await websocket_manager.stop()
-        
         await close_chatwoot_client()
         
         logger.info("✅ Vital Chatwoot Bridge shutdown complete")
@@ -93,9 +86,38 @@ app.add_middleware(
 
 @app.post("/webhook/chatwoot")
 async def chatwoot_webhook(request: Request):
-    """Handle incoming Chatwoot webhooks."""
+    """Handle incoming Chatwoot webhooks with signature verification."""
     try:
-        payload = await request.json()
+        # Get raw payload for signature verification
+        raw_payload = await request.body()
+        payload_str = raw_payload.decode('utf-8')
+        
+        # Log all webhook headers for debugging
+        log_webhook_headers(dict(request.headers))
+        
+        # Get signature and timestamp headers
+        signature = request.headers.get('X-Chatwoot-Signature')
+        timestamp = request.headers.get('X-Chatwoot-Timestamp')
+        
+        # Verify webhook signature
+        is_valid = verify_webhook_signature(
+            payload=payload_str,
+            signature=signature,
+            timestamp=timestamp,
+            webhook_secret=settings.chatwoot_bot_webhook_secret,
+            enforce_signatures=settings.enforce_webhook_signatures
+        )
+        
+        if not is_valid:
+            logger.error("🔐 WEBHOOK: Signature verification failed - rejecting webhook")
+            raise HTTPException(status_code=401, detail="Invalid webhook signature")
+        
+        # Parse JSON payload after signature verification
+        try:
+            payload = json.loads(payload_str) if payload_str else {}
+        except json.JSONDecodeError as e:
+            logger.error(f"🔐 WEBHOOK: Invalid JSON payload: {e}")
+            raise HTTPException(status_code=400, detail="Invalid JSON payload")
         
         if not webhook_handler:
             raise HTTPException(status_code=503, detail="Webhook handler not initialized")
@@ -103,6 +125,9 @@ async def chatwoot_webhook(request: Request):
         response = await webhook_handler.handle_webhook(payload)
         return response
         
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
         logger.error(f"Webhook processing error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Webhook processing failed: {str(e)}")
@@ -115,14 +140,9 @@ async def get_status():
         status = {
             "service": "vital-chatwoot-bridge",
             "status": "running",
-            "websocket_manager": "not_initialized",
-            "agents": {},
+            "websocket_client": "per_message",
             "chatwoot_api": "unknown"
         }
-        
-        if websocket_manager:
-            status["websocket_manager"] = "running"
-            status["agents"] = await websocket_manager.get_all_agent_status()
         
         # Check Chatwoot API
         try:

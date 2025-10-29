@@ -16,3 +16,5 @@ post webhook --> post chatwoot api
 
 
 
+need to get current conversation to create history objects to put into message sent to agent
+

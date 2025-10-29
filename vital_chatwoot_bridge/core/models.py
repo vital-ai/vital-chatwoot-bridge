@@ -33,7 +33,7 @@ class BridgeToAgentMessage(BaseModel):
     """Message format sent from bridge to AI agent."""
     message_id: str = Field(..., description="Unique message ID for correlation")
     inbox_id: str = Field(..., description="Chatwoot inbox identifier")
-    conversation_id: str = Field(..., description="Chatwoot conversation ID")
+    conversation_id: int = Field(..., description="Chatwoot conversation ID")
     content: str = Field(..., description="Message content from customer")
     sender: MessageSender = Field(..., description="Message sender information")
     context: MessageContext = Field(..., description="Message context")
@@ -43,6 +43,7 @@ class BridgeToAgentMessage(BaseModel):
 class AgentResponseMetadata(BaseModel):
     """Metadata for AI agent response."""
     agent_id: str = Field(..., description="AI agent identifier")
+    source: str = Field(..., description="Response source identifier")
     processing_time_ms: Optional[int] = Field(None, description="Processing time in milliseconds")
     confidence: Optional[float] = Field(None, description="Response confidence score")
     ai_model_version: Optional[str] = Field(None, description="AI model version used")

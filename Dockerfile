@@ -16,10 +16,17 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         curl \
+        unixodbc \
+        unixodbc-dev \
+        libodbccr2 \
+        libodbc2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
 COPY requirements.txt ./
+
+COPY vital_env.env vital_env.env
+COPY vitalhome vitalhome
 
 # Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip \

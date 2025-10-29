@@ -99,7 +99,7 @@ class ChatwootAPIClient:
             # Make request
             response = await self.client.post(
                 url,
-                json=request_data.dict(exclude_none=True)
+                json=request_data.model_dump(exclude_none=True)
             )
             
             logger.info(f"✅ REST: Received response from Chatwoot API: HTTP {response.status_code}")
@@ -386,8 +386,8 @@ class ChatwootAPIClient:
             True if API is accessible, False otherwise
         """
         try:
-            # Try to access the accounts endpoint
-            url = f"{self.base_url}/api/v1/accounts"
+            # Try to access a valid Chatwoot API endpoint with account ID
+            url = f"{self.base_url}/api/v1/accounts/{self.settings.chatwoot_account_id}/conversations"
             
             response = await self.client.get(url)
             

@@ -32,7 +32,7 @@ class ChatwootWebhookMessageData(BaseModel):
 class ChatwootWebhookEvent(BaseModel):
     """Chatwoot webhook event - matches actual Chatwoot webhook payload structure."""
     event: str = Field(..., description="Event type (e.g., 'message_created')")
-    id: str = Field(..., description="Message ID as string")
+    id: int = Field(..., description="Message ID as integer")
     content: str = Field(..., description="Message content")
     created_at: str = Field(..., description="Creation timestamp")
     message_type: str = Field(..., description="Message type (incoming/outgoing/template)")
@@ -40,9 +40,11 @@ class ChatwootWebhookEvent(BaseModel):
     content_attributes: Dict[str, Any] = Field(default_factory=dict, description="Content attributes object")
     source_id: Optional[str] = Field(default="", description="External ID for integrations")
     sender: Dict[str, Any] = Field(..., description="Sender details (agent or contact)")
-    contact: Dict[str, Any] = Field(..., description="Contact details")
     conversation: Dict[str, Any] = Field(..., description="Conversation details with display_id")
     account: Dict[str, Any] = Field(..., description="Account details")
+    inbox: Dict[str, Any] = Field(..., description="Inbox details")
+    additional_attributes: Dict[str, Any] = Field(default_factory=dict, description="Additional attributes")
+    private: bool = Field(default=False, description="Whether message is private")
 
 
 class ChatwootInbox(BaseModel):
@@ -195,18 +197,18 @@ class ChatwootAPIMessageRequest(BaseModel):
 
 class ChatwootAPIMessageResponse(BaseModel):
     """Response model from Chatwoot API when creating messages."""
-    id: str = Field(..., description="Message ID")
+    id: int = Field(..., description="Message ID")
     content: str = Field(..., description="Message content")
-    account_id: str = Field(..., description="Account ID")
-    inbox_id: str = Field(..., description="Inbox ID")
-    conversation_id: str = Field(..., description="Conversation ID")
-    message_type: int = Field(..., description="Message type")
-    created_at: int = Field(..., description="Creation timestamp")
-    updated_at: int = Field(..., description="Update timestamp")
-    private: bool = Field(..., description="Whether message is private")
-    status: str = Field(..., description="Message status")
+    account_id: Optional[int] = Field(None, description="Account ID")
+    inbox_id: Optional[int] = Field(None, description="Inbox ID")
+    conversation_id: Optional[int] = Field(None, description="Conversation ID")
+    message_type: Optional[int] = Field(None, description="Message type")
+    created_at: Optional[int] = Field(None, description="Creation timestamp")
+    updated_at: Optional[int] = Field(None, description="Update timestamp")
+    private: Optional[bool] = Field(None, description="Whether message is private")
+    status: Optional[str] = Field(None, description="Message status")
     source_id: Optional[str] = Field(None, description="Source identifier")
-    content_type: str = Field(..., description="Content type")
-    content_attributes: Dict[str, Any] = Field(..., description="Content attributes")
-    sender_type: str = Field(..., description="Sender type")
-    sender_id: str = Field(..., description="Sender ID")
+    content_type: Optional[str] = Field(None, description="Content type")
+    content_attributes: Optional[Dict[str, Any]] = Field(None, description="Content attributes")
+    sender_type: Optional[str] = Field(None, description="Sender type")
+    sender_id: Optional[int] = Field(None, description="Sender ID")

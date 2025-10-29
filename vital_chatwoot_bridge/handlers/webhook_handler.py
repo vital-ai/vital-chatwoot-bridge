@@ -7,7 +7,7 @@ import json
 import logging
 import uuid
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from pydantic import ValidationError
 
 from vital_chatwoot_bridge.core.config import get_settings
@@ -18,7 +18,8 @@ from vital_chatwoot_bridge.core.models import (
 from vital_chatwoot_bridge.chatwoot.models import (
     ChatwootWebhookEvent, ChatwootWebhookMessageData
 )
-from vital_chatwoot_bridge.agents.websocket_manager import WebSocketManager
+from vital_chatwoot_bridge.agents.aimp_message_client import AimpMessageClient
+from vital_chatwoot_bridge.agents.models import AgentChatResponse
 from vital_chatwoot_bridge.chatwoot.api_client import ChatwootAPIClient
 
 logger = logging.getLogger(__name__)
@@ -27,8 +28,8 @@ logger = logging.getLogger(__name__)
 class WebhookHandler:
     """Handle Chatwoot webhook events."""
     
-    def __init__(self, websocket_manager: WebSocketManager, api_client: ChatwootAPIClient):
-        self.websocket_manager = websocket_manager
+    def __init__(self, api_client: ChatwootAPIClient):
+        self.websocket_client = AimpMessageClient()
         self.api_client = api_client
         self.settings = get_settings()
     
@@ -38,28 +39,28 @@ class WebhookHandler:
             logger.info(f"📨 REST: Received Chatwoot webhook")
             logger.info(f"📨 REST: Webhook payload keys: {list(payload.keys())}")
             
-            # Parse the webhook event
-            webhook_event = ChatwootWebhookEvent(**payload)
-            event_type = webhook_event.event
-            
+            # First, determine the event type without parsing the full payload
+            event_type = payload.get("event", "unknown")
             logger.info(f"📨 REST: Processing webhook event type: {event_type}")
             
             # Route based on event type
-            if webhook_event.event == "message_created":
+            if event_type == "message_created":
+                # Only parse as ChatwootWebhookEvent for message_created events
+                webhook_event = ChatwootWebhookEvent(**payload)
                 return await self._handle_message_created(webhook_event)
             else:
-                logger.info(f"📨 REST: Ignoring event type: {webhook_event.event}")
+                logger.info(f"📨 REST: Ignoring event type: {event_type}")
                 return WebhookResponse(
                     status="ignored",
-                    message=f"Event type {webhook_event.event} not handled"
-                ).dict()
+                    message=f"Event type {event_type} not handled"
+                ).model_dump()
         
         except Exception as e:
             logger.error(f"Webhook handling error: {str(e)}", exc_info=True)
             return ErrorResponse(
                 error=f"Failed to process webhook: {str(e)}",
                 error_code="webhook_processing_error"
-            ).dict()
+            ).model_dump()
     
     async def _handle_message_created(self, event_data: ChatwootWebhookEvent) -> Dict[str, Any]:
         """Handle message_created webhook event."""
@@ -71,7 +72,16 @@ class WebhookHandler:
                 return WebhookResponse(
                     status="ignored",
                     message="Outgoing message ignored"
-                ).dict()
+                ).model_dump()
+            
+            # Check if sender is an agent (not a contact) to prevent responding to our own messages
+            sender_type = event_data.sender.get("type", "").lower()
+            if sender_type == "user" or sender_type == "agent":
+                logger.debug(f"Ignoring message from agent/user {event_data.id}")
+                return WebhookResponse(
+                    status="ignored",
+                    message="Agent/user message ignored"
+                ).model_dump()
             
             # Find agent configuration for this inbox
             inbox_id = None
@@ -85,7 +95,7 @@ class WebhookHandler:
                 return WebhookResponse(
                     status="error",
                     message="Could not extract inbox_id from payload"
-                ).dict()
+                ).model_dump()
             
             logger.info(f"🎯 WEBHOOK: Extracted inbox_id: '{inbox_id}' from webhook payload")
             
@@ -98,7 +108,7 @@ class WebhookHandler:
                 return WebhookResponse(
                     status="ignored",
                     message=f"No agent configured for inbox {inbox_id}"
-                ).dict()
+                ).model_dump()
             
             logger.info(f"🎯 WEBHOOK: Selected agent '{agent_config.agent_id}' for inbox '{inbox_id}'")
             
@@ -125,23 +135,33 @@ class WebhookHandler:
             
             logger.info(f"Sending message {message_id} to agent {agent_config.agent_id}")
             
-            # Send message to agent and get response
-            response = await self._send_message_sync(agent_config, bridge_message)
+            # Send message to agent and get responses
+            responses = await self._send_message_to_agent(agent_config, bridge_message)
             
-            if response:
-                # Post response back to Chatwoot immediately
-                await self._post_response_to_chatwoot(
-                    event_data.account.get("id"),
-                    event_data.conversation.get("id"),
-                    response,
-                    private=False
-                )
+            if responses:
+                # Post all responses to Chatwoot
+                account_id = event_data.account.get("id")
+                conversation_id = event_data.conversation.get("id")
                 
+                for response in responses:
+                    if response.success:
+                        await self._post_response_to_chatwoot(
+                            account_id,
+                            conversation_id,
+                            response.content,
+                            private=False
+                        )
+                
+                # Return first response content in webhook response
+                first_response = responses[0]
                 return WebhookResponse(
                     status="processed_sync",
-                    message="Message processed and response sent",
-                    data={"response_content": response}
-                ).dict()
+                    message=f"Message processed and {len(responses)} response(s) sent",
+                    data={
+                        "response_content": first_response.content,
+                        "total_responses": len(responses)
+                    }
+                ).model_dump()
             else:
                 # Fallback response if agent doesn't respond in time
                 fallback_msg = "I apologize, but I'm experiencing technical difficulties. Please try again in a moment."
@@ -155,21 +175,21 @@ class WebhookHandler:
                 return WebhookResponse(
                     status="processed_fallback",
                     message="Fallback response sent due to agent timeout"
-                ).dict()
+                ).model_dump()
         
         except ValidationError as e:
             logger.error(f"Invalid message_created payload: {e}")
             return ErrorResponse(
                 error="invalid_payload",
                 error_code="invalid_payload"
-            ).dict()
+            ).model_dump()
         
         except Exception as e:
             logger.error(f"Error processing message: {str(e)}", exc_info=True)
             return ErrorResponse(
                 error="processing_error",
                 error_code="message_processing_failed"
-            ).dict()
+            ).model_dump()
     
     async def _handle_conversation_created(self, event_data: ChatwootWebhookMessageData) -> Dict[str, Any]:
         """Handle conversation_created webhook event."""
@@ -179,21 +199,21 @@ class WebhookHandler:
             return WebhookResponse(
                 status="acknowledged",
                 message=f"Conversation {event_data.conversation.get('id')} created"
-            ).dict()
+            ).model_dump()
         
         except ValidationError as e:
             logger.error(f"Invalid conversation_created payload: {e}")
             return ErrorResponse(
                 error="invalid_payload",
                 error_code="invalid_payload"
-            ).dict()
+            ).model_dump()
         
         except Exception as e:
             logger.error(f"Error processing conversation creation: {str(e)}", exc_info=True)
             return ErrorResponse(
                 error="processing_error",
                 error_code="conversation_creation_failed"
-            ).dict()
+            ).model_dump()
     
     async def _handle_webwidget_triggered(self, event_data: ChatwootWebhookMessageData) -> Dict[str, Any]:
         """Handle webwidget_triggered webhook event."""
@@ -203,40 +223,38 @@ class WebhookHandler:
             return WebhookResponse(
                 status="acknowledged",
                 message="Web widget triggered"
-            ).dict()
+            ).model_dump()
         
         except ValidationError as e:
             logger.error(f"Invalid webwidget_triggered payload: {e}")
             return ErrorResponse(
                 error="invalid_payload",
                 error_code="invalid_payload"
-            ).dict()
+            ).model_dump()
         
         except Exception as e:
             logger.error(f"Error processing web widget trigger: {str(e)}", exc_info=True)
             return ErrorResponse(
                 error="processing_error",
                 error_code="webwidget_processing_failed"
-            ).dict()
+            ).model_dump()
     
-    async def _send_message_sync(self, agent_config, bridge_message: BridgeToAgentMessage) -> Optional[str]:
-        """Send message to agent synchronously and wait for response."""
+    async def _send_message_to_agent(self, agent_config, bridge_message: BridgeToAgentMessage) -> List[AgentChatResponse]:
+        """Send message to agent and handle multiple responses."""
         try:
-            response = await self.websocket_manager.send_message_sync(
+            # Send message and get all responses
+            responses = await self.websocket_client.send_message_with_responses(
                 agent_config.websocket_url,
                 bridge_message,
-                timeout=agent_config.timeout_seconds
+                timeout=agent_config.timeout_seconds,
+                max_responses=getattr(agent_config, 'max_responses', 5)
             )
             
-            if response and response.success:
-                return response.content
-            else:
-                logger.warning(f"Agent response failed or empty: {response}")
-                return None
+            return responses
         
         except Exception as e:
-            logger.error(f"Error sending sync message to agent: {str(e)}")
-            return None
+            logger.error(f"Error sending message to agent: {str(e)}")
+            return []
     
     async def _post_response_to_chatwoot(self, account_id: int, conversation_id: int, content: str, private: bool = False):
         """Post response back to Chatwoot."""
