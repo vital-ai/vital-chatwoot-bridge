@@ -3,7 +3,7 @@ Chatwoot webhook and API data models.
 """
 
 from datetime import datetime
-from typing import Dict, Any, List, Optional, Literal
+from typing import Dict, Any, List, Optional, Literal, Union
 from pydantic import BaseModel, Field
 
 
@@ -35,7 +35,7 @@ class ChatwootWebhookEvent(BaseModel):
     id: int = Field(..., description="Message ID as integer")
     content: str = Field(..., description="Message content")
     created_at: str = Field(..., description="Creation timestamp")
-    message_type: str = Field(..., description="Message type (incoming/outgoing/template)")
+    message_type: Union[str, int] = Field(..., description="Message type (incoming/outgoing/template or 0/1/2)")
     content_type: str = Field(default="text", description="Content type (text, input_select, cards, form)")
     content_attributes: Dict[str, Any] = Field(default_factory=dict, description="Content attributes object")
     source_id: Optional[str] = Field(default="", description="External ID for integrations")

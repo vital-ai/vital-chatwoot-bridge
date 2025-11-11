@@ -1,0 +1,29 @@
+{
+  "loopmessage": {
+    "inbox_identifier": "NUCyR3zVNKSVLmfxktmiZq6e",
+    "chatwoot_inbox_id": "2",
+    "name": "LoopMessage iMessages",
+    "message_types": ["imessage"],
+    "contact_identifier_field": "phone_number",
+    "supports_outbound": true,
+    "outbound_webhook_url": "https://loopmessage-api.com/send",
+    "description": "Bidirectional iMessage conversations via LoopMessage integration",
+    "hmac_secret": "your_loopmessage_hmac_secret_here"
+  },
+  "attentive": {
+    "inbox_identifier": "azDPkpPte5XNFhJR9rt7mWDt",
+    "chatwoot_inbox_id": "3", 
+    "name": "Attentive Messages",
+    "message_types": ["email", "sms"],
+    "contact_identifier_field": "email_or_phone",
+    "supports_outbound": false,
+    "webhook_events": {
+      "sms.sent": "business_to_customer",
+      "email.sent": "business_to_customer", 
+      "sms.inbound_message": "customer_to_business"
+    },
+    "supports_email_replies": true,
+    "description": "Aggregation of Attentive messages via webhook events and email replies",
+    "hmac_secret": "your_attentive_hmac_secret_here"
+  }
+}

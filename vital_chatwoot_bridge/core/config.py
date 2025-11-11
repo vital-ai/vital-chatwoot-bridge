@@ -5,7 +5,7 @@ Configuration settings for the Vital Chatwoot Bridge application.
 import os
 import json
 import logging
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from functools import lru_cache
 from pydantic import BaseModel, Field
 
@@ -26,6 +26,21 @@ class InboxMapping(BaseModel):
     agent_config: AgentConfig = Field(..., description="AI agent configuration")
 
 
+class APIInboxConfig(BaseModel):
+    """Configuration for an API inbox."""
+    inbox_identifier: str = Field(..., description="API inbox identifier from Chatwoot")
+    chatwoot_inbox_id: Optional[str] = Field(None, description="Internal Chatwoot inbox ID for webhook mapping")
+    name: str = Field(..., description="Human-readable inbox name")
+    message_types: List[str] = Field(..., description="Supported message types (email, sms, imessage)")
+    contact_identifier_field: str = Field(..., description="Field to use for contact identification")
+    supports_outbound: bool = Field(default=False, description="Whether outbound messages are supported")
+    outbound_webhook_url: Optional[str] = Field(None, description="URL for outbound message delivery")
+    webhook_events: Optional[Dict[str, str]] = Field(None, description="Supported webhook events and their directions")
+    supports_email_replies: bool = Field(default=False, description="Whether email replies are supported outside webhooks")
+    description: Optional[str] = Field(None, description="Inbox description")
+    hmac_secret: Optional[str] = Field(None, description="HMAC secret for webhook verification")
+
+
 class Config:
     """Simple configuration class that reads from environment variables."""
     
@@ -42,9 +57,21 @@ class Config:
         # Chatwoot API Configuration
         self.chatwoot_base_url = os.getenv('CHATWOOT_BASE_URL', '')
         self.chatwoot_api_access_token = os.getenv('CHATWOOT_API_ACCESS_TOKEN', '')
+        self.chatwoot_user_access_token = os.getenv('CHATWOOT_USER_ACCESS_TOKEN', '')
         self.chatwoot_account_id = os.getenv('CHATWOOT_ACCOUNT_ID', '1')
         self.chatwoot_bot_webhook_secret = os.getenv('CHATWOOT_BOT_WEBHOOK_SECRET', '')
         self.enforce_webhook_signatures = os.getenv('ENFORCE_WEBHOOK_SIGNATURES', 'true').lower() == 'true'
+        
+        # Chatwoot Client API Configuration (for API inboxes)
+        self.chatwoot_client_api_base_url = os.getenv('CHATWOOT_CLIENT_API_BASE_URL', 
+                                                     f"{self.chatwoot_base_url.rstrip('/')}/public/api/v1" if self.chatwoot_base_url else '')
+        
+        # API Inbox Configuration
+        self.api_inboxes_config_path = os.getenv('CHATWOOT_API_INBOXES_CONFIG_PATH', '')
+        self.loopmessage_api_url = os.getenv('LOOPMESSAGE_API_URL', 'https://server.loopmessage.com/api/v1')
+        self.loopmessage_authorization_key = os.getenv('LOOPMESSAGE_AUTHORIZATION_KEY', '')
+        self.loopmessage_secret_key = os.getenv('LOOPMESSAGE_SECRET_KEY', '')
+        self.loopmessage_sender_name = os.getenv('LOOPMESSAGE_SENDER_NAME', '')
         
         # Keycloak Configuration for JWT tokens
         self.keycloak_realm = os.getenv('KEYCLOAK_REALM', '')
@@ -66,6 +93,9 @@ class Config:
         
         # Parse inbox agent mappings from JSON
         self.inbox_agent_mappings = self._parse_inbox_mappings()
+        
+        # Parse API inbox configurations
+        self.api_inboxes = self._parse_api_inboxes()
     
     def _parse_inbox_mappings(self) -> List[InboxMapping]:
         """Parse inbox mappings from JSON environment variable."""
@@ -81,11 +111,57 @@ class Config:
             logger.error(f"❌ CONFIG: Failed to parse INBOX_AGENT_MAPPINGS JSON: {e}")
             return []
     
+    def _parse_api_inboxes(self) -> Dict[str, APIInboxConfig]:
+        """Parse API inbox configurations from JSON file or environment."""
+        if not self.api_inboxes_config_path:
+            logger.info("📋 CONFIG: No API inboxes config path specified")
+            return {}
+        
+        try:
+            if os.path.exists(self.api_inboxes_config_path):
+                with open(self.api_inboxes_config_path, 'r') as f:
+                    config_data = json.load(f)
+            else:
+                # Try to load from environment variable as fallback
+                config_json = os.getenv('API_INBOXES_CONFIG', '{}')
+                config_data = json.loads(config_json)
+            
+            logger.info(f"📋 CONFIG: Loading {len(config_data)} API inbox configurations")
+            
+            api_inboxes = {}
+            for inbox_type, config in config_data.items():
+                api_inboxes[inbox_type] = APIInboxConfig(**config)
+                logger.info(f"📋 CONFIG: Loaded API inbox '{inbox_type}': {config.get('name', 'Unknown')}")
+            
+            return api_inboxes
+            
+        except (json.JSONDecodeError, FileNotFoundError, ValueError) as e:
+            logger.error(f"❌ CONFIG: Failed to parse API inboxes config: {e}")
+            return {}
+    
     def get_agent_for_inbox(self, inbox_id: str) -> Optional[AgentConfig]:
         """Get the AI agent configuration for a specific inbox."""
         for mapping in self.inbox_agent_mappings:
             if mapping.inbox_id == inbox_id:
                 return mapping.agent_config
+        return None
+    
+    def get_api_inbox_config(self, inbox_type: str) -> Optional[APIInboxConfig]:
+        """Get the API inbox configuration for a specific inbox type."""
+        return self.api_inboxes.get(inbox_type)
+    
+    def get_api_inbox_by_identifier(self, inbox_identifier: str) -> Optional[APIInboxConfig]:
+        """Get the API inbox configuration by Chatwoot inbox identifier."""
+        for config in self.api_inboxes.values():
+            if config.inbox_identifier == inbox_identifier:
+                return config
+        return None
+    
+    def get_api_inbox_by_chatwoot_id(self, chatwoot_inbox_id: str) -> Optional[APIInboxConfig]:
+        """Get the API inbox configuration by Chatwoot internal inbox ID."""
+        for config in self.api_inboxes.values():
+            if config.chatwoot_inbox_id == chatwoot_inbox_id:
+                return config
         return None
     
 

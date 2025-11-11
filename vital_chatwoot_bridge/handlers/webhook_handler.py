@@ -21,6 +21,8 @@ from vital_chatwoot_bridge.chatwoot.models import (
 from vital_chatwoot_bridge.agents.aimp_message_client import AimpMessageClient
 from vital_chatwoot_bridge.agents.models import AgentChatResponse
 from vital_chatwoot_bridge.chatwoot.api_client import ChatwootAPIClient
+from vital_chatwoot_bridge.services.api_inbox_service import APIInboxService
+from vital_chatwoot_bridge.chatwoot.client_models import LoopMessageOutboundRequest
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,7 @@ class WebhookHandler:
         self.websocket_client = AimpMessageClient()
         self.api_client = api_client
         self.settings = get_settings()
+        self.api_inbox_service = APIInboxService()
     
     async def handle_webhook(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Handle incoming webhook from Chatwoot."""
@@ -65,13 +68,18 @@ class WebhookHandler:
     async def _handle_message_created(self, event_data: ChatwootWebhookEvent) -> Dict[str, Any]:
         """Handle message_created webhook event."""
         try:
+            # Convert integer message_type to string if needed
+            message_type_str = self._normalize_message_type(event_data.message_type)
+            
+            # Main webhook only handles inbound messages for agent processing
+            # Outbound messages are handled by separate endpoint: /api/v1/inboxes/loopmessage/messages/outbound
             
             # Check if this is an incoming message (from customer)
-            if event_data.message_type != "incoming":
-                logger.debug(f"Ignoring outgoing message {event_data.id}")
+            if message_type_str != "incoming":
+                logger.debug(f"Ignoring message type {message_type_str} ({event_data.message_type}) for message {event_data.id}")
                 return WebhookResponse(
                     status="ignored",
-                    message="Outgoing message ignored"
+                    message=f"Message type {message_type_str} ignored"
                 ).model_dump()
             
             # Check if sender is an agent (not a contact) to prevent responding to our own messages
@@ -191,6 +199,195 @@ class WebhookHandler:
                 error_code="message_processing_failed"
             ).model_dump()
     
+    async def _handle_outbound_message(self, event_data: ChatwootWebhookEvent) -> Dict[str, Any]:
+        """Handle outbound message for LoopMessage integration."""
+        try:
+            # Extract inbox information - use internal inbox ID from conversation
+            chatwoot_inbox_id = None
+            if "inbox_id" in event_data.conversation:
+                chatwoot_inbox_id = str(event_data.conversation.get("inbox_id"))
+            elif hasattr(event_data, 'inbox') and event_data.inbox:
+                chatwoot_inbox_id = str(event_data.inbox.get("id")) if isinstance(event_data.inbox, dict) else None
+            
+            if not chatwoot_inbox_id:
+                logger.error(f"Could not extract chatwoot_inbox_id from outbound message webhook")
+                return WebhookResponse(
+                    status="error",
+                    message="Could not extract chatwoot_inbox_id from payload"
+                ).model_dump()
+            
+            logger.info(f"📤 WEBHOOK: Processing outbound message for Chatwoot inbox ID: {chatwoot_inbox_id}")
+            
+            # Check if this is an API inbox by looking up the internal Chatwoot inbox ID
+            logger.info(f"🔍 DEBUG: Looking up API inbox config for Chatwoot inbox ID: {chatwoot_inbox_id}")
+            api_inbox_config = self.settings.get_api_inbox_by_chatwoot_id(chatwoot_inbox_id)
+            logger.info(f"🔍 DEBUG: API inbox config result: {api_inbox_config}")
+            if not api_inbox_config:
+                logger.info(f"🔍 DEBUG: Chatwoot inbox ID {chatwoot_inbox_id} is not an API inbox, ignoring outbound message")
+                return WebhookResponse(
+                    status="ignored",
+                    message="Not an API inbox"
+                ).model_dump()
+            
+            # Check if it's specifically a LoopMessage inbox that supports outbound
+            logger.info(f"🔍 DEBUG: Found API inbox config: {api_inbox_config.name}")
+            logger.info(f"🔍 DEBUG: API inbox identifier: {api_inbox_config.inbox_identifier}")
+            
+            # Check if this is the LoopMessage inbox by comparing with known LoopMessage config
+            loopmessage_config = self.settings.get_api_inbox_config("loopmessage")
+            if not loopmessage_config or api_inbox_config.inbox_identifier != loopmessage_config.inbox_identifier:
+                logger.info(f"🔍 DEBUG: This is not the LoopMessage inbox (found: {api_inbox_config.name}), ignoring outbound message")
+                return WebhookResponse(
+                    status="ignored",
+                    message="Not a LoopMessage inbox"
+                ).model_dump()
+            
+            if not api_inbox_config.supports_outbound:
+                logger.debug(f"LoopMessage inbox does not support outbound messages")
+                return WebhookResponse(
+                    status="ignored",
+                    message="LoopMessage inbox does not support outbound"
+                ).model_dump()
+            
+            # Check sender type - only allow agent/bot responses, NOT customer messages
+            sender_type = event_data.sender.get("type", "").lower()
+            logger.info(f"🔍 DEBUG: Sender type: {sender_type}")
+            
+            # Only process outbound messages from agents/bots, NOT from customers
+            if sender_type in ["contact"]:
+                logger.info(f"🔍 DEBUG: Ignoring outbound message from {sender_type} - customer messages should not be sent back to customer")
+                return WebhookResponse(
+                    status="ignored",
+                    message=f"Customer message ignored - not sending back to customer"
+                ).model_dump()
+            
+            # Only exclude system messages and customer messages
+            if sender_type in ["system"]:
+                logger.info(f"🔍 DEBUG: Ignoring outbound message from {sender_type} - system messages not sent to LoopMessage")
+                return WebhookResponse(
+                    status="ignored",
+                    message=f"System message ignored"
+                ).model_dump()
+            
+            # Only allow agent/bot responses to be sent outbound
+            if sender_type in ["user", "agent", "agent_bot", "bot"]:
+                logger.info(f"🔍 DEBUG: Processing outbound message from {sender_type}")
+            else:
+                logger.info(f"🔍 DEBUG: Unknown sender type {sender_type} - ignoring to be safe")
+                return WebhookResponse(
+                    status="ignored",
+                    message=f"Unknown sender type {sender_type} ignored"
+                ).model_dump()
+            
+            # For outbound webhooks, try to extract phone number from conversation metadata first
+            contact_phone = None
+            
+            # Check if phone number is available in conversation meta or other fields
+            logger.info(f"🔍 DEBUG: Checking webhook payload for phone number")
+            logger.info(f"🔍 DEBUG: Full conversation data: {event_data.conversation}")
+            
+            # Try to get phone from conversation meta if available
+            if "meta" in event_data.conversation:
+                meta = event_data.conversation["meta"]
+                logger.info(f"🔍 DEBUG: Conversation meta: {meta}")
+                if "sender" in meta:
+                    sender_info = meta["sender"]
+                    contact_phone = sender_info.get("phone_number") or sender_info.get("phone")
+                    logger.info(f"🔍 DEBUG: Phone from conversation meta.sender: {contact_phone}")
+            
+            # If no phone number found, try API call as fallback (will fail with bot token)
+            if not contact_phone:
+                try:
+                    conversation_id = event_data.conversation.get("id")
+                    logger.info(f"🔍 DEBUG: No phone in webhook payload, trying Chatwoot API for conversation {conversation_id}")
+                    
+                    # Create Chatwoot API client instance
+                    from vital_chatwoot_bridge.chatwoot.api_client import ChatwootAPIClient
+                    api_client = ChatwootAPIClient()
+                    
+                    conversation_data = await api_client.get_conversation(
+                        account_id=self.settings.chatwoot_account_id,
+                        conversation_id=conversation_id
+                    )
+                    
+                    if conversation_data:
+                        logger.info(f"🔍 DEBUG: Fetched conversation data from API")
+                        
+                        # Convert Pydantic model to dict if needed
+                        if hasattr(conversation_data, 'model_dump'):
+                            conversation_dict = conversation_data.model_dump()
+                        elif hasattr(conversation_data, 'dict'):
+                            conversation_dict = conversation_data.dict()
+                        else:
+                            conversation_dict = conversation_data
+                        
+                        # Try to get contact phone from the API response
+                        if "contact" in conversation_dict:
+                            contact_info = conversation_dict["contact"]
+                            contact_phone = contact_info.get("phone_number") or contact_info.get("phone")
+                            logger.info(f"🔍 DEBUG: Phone from API contact: {contact_phone}")
+                        
+                        # Try meta sender if available
+                        if not contact_phone and "meta" in conversation_dict and "sender" in conversation_dict["meta"]:
+                            sender_info = conversation_dict["meta"]["sender"]
+                            contact_phone = sender_info.get("phone_number") or sender_info.get("phone")
+                            logger.info(f"🔍 DEBUG: Phone from API meta.sender: {contact_phone}")
+                    else:
+                        logger.warning(f"🔍 DEBUG: No conversation data returned from API")
+                        
+                except Exception as e:
+                    logger.warning(f"🔍 DEBUG: Error fetching conversation from API: {e}")
+            
+            logger.info(f"🔍 DEBUG: Final phone number: {contact_phone}")
+            if not contact_phone:
+                logger.warning(f"🔍 DEBUG: Could not extract phone number for LoopMessage outbound message - ignoring this webhook call")
+                return WebhookResponse(
+                    status="ignored",
+                    message="Could not extract phone number - likely duplicate webhook call"
+                ).model_dump()
+            
+            # Get agent information
+            agent_name = "Chatwoot Agent"
+            if event_data.sender.get("type") in ["user", "agent"]:
+                agent_name = event_data.sender.get("name", "Chatwoot Agent")
+            
+            logger.info(f"🔍 DEBUG: Agent name: {agent_name}")
+            logger.info(f"🔍 DEBUG: Message content: {event_data.content}")
+            
+            # Create LoopMessage outbound request
+            outbound_request = LoopMessageOutboundRequest(
+                phone_number=contact_phone,
+                message_content=event_data.content,
+                conversation_id=str(event_data.conversation.get("id")),
+                chatwoot_message_id=str(event_data.id),
+                agent_name=agent_name
+            )
+            
+            logger.info(f"📤 WEBHOOK: Sending LoopMessage to {contact_phone}: {event_data.content[:50]}...")
+            logger.info(f"🔍 DEBUG: About to call process_loopmessage_outbound")
+            
+            # Process the outbound message via API inbox service
+            result = await self.api_inbox_service.process_loopmessage_outbound(outbound_request)
+            logger.info(f"🔍 DEBUG: LoopMessage API result: {result}")
+            
+            logger.info(f"✅ WEBHOOK: LoopMessage outbound processed successfully")
+            return WebhookResponse(
+                status="processed",
+                message="LoopMessage outbound sent successfully",
+                data={
+                    "phone_number": contact_phone,
+                    "delivery_status": result.get("delivery_status", "unknown"),
+                    "loopmessage_message_id": result.get("loopmessage_result", {}).get("message_id")
+                }
+            ).model_dump()
+            
+        except Exception as e:
+            logger.error(f"Error processing LoopMessage outbound: {str(e)}", exc_info=True)
+            return WebhookResponse(
+                status="error",
+                message=f"Failed to process LoopMessage outbound: {str(e)}"
+            ).model_dump()
+    
     async def _handle_conversation_created(self, event_data: ChatwootWebhookMessageData) -> Dict[str, Any]:
         """Handle conversation_created webhook event."""
         try:
@@ -270,3 +467,20 @@ class WebhookHandler:
         
         except Exception as e:
             logger.error(f"Failed to post response to Chatwoot: {str(e)}")
+    
+    def _normalize_message_type(self, message_type) -> str:
+        """Convert integer message_type to string format."""
+        if isinstance(message_type, int):
+            # Chatwoot integer message types: 0=incoming, 1=outgoing, 2=activity/template
+            if message_type == 0:
+                return "incoming"
+            elif message_type == 1:
+                return "outgoing"
+            elif message_type == 2:
+                return "activity"
+            else:
+                return "unknown"
+        elif isinstance(message_type, str):
+            return message_type.lower()
+        else:
+            return "unknown"

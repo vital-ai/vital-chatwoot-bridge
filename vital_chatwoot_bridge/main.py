@@ -19,6 +19,7 @@ load_dotenv()
 
 from vital_chatwoot_bridge.core.config import get_settings
 from vital_chatwoot_bridge.api.routes import health_router
+from vital_chatwoot_bridge.api.api_inbox_routes import api_inbox_router
 from vital_chatwoot_bridge.handlers.webhook_handler import WebhookHandler
 from vital_chatwoot_bridge.chatwoot.api_client import get_chatwoot_client, close_chatwoot_client
 from vital_chatwoot_bridge.utils.webhook_security import verify_webhook_signature, log_webhook_headers
@@ -161,6 +162,7 @@ async def get_status():
 
 # Include API routes
 app.include_router(health_router)
+app.include_router(api_inbox_router)
 
 
 @app.on_event("startup")
