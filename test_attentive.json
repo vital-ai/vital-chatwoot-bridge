@@ -1,0 +1,18 @@
+{
+  "type": "sms.inbound_message",
+  "timestamp": 1699646400,
+  "company": {
+    "id": "company_123",
+    "name": "Test Company"
+  },
+  "subscriber": {
+    "phone": "+1234567890",
+    "email": "test@example.com",
+    "name": "Test Customer"
+  },
+  "message": {
+    "id": "msg_123",
+    "text": "Customer SMS reply via Attentive",
+    "channel": "sms"
+  }
+}
