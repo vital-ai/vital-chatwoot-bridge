@@ -29,14 +29,14 @@ class ChatwootAPIError(Exception):
 
 
 class ChatwootAPIClient:
-    """Client for interacting with Chatwoot API."""
+    """Client for interacting with Chatwoot Main API using user token."""
     
     def __init__(self):
         self.settings = get_settings()
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0),
             headers={
-                "api_access_token": self.settings.chatwoot_api_access_token,
+                "api_access_token": self.settings.chatwoot_user_access_token,
                 "Content-Type": "application/json"
             }
         )

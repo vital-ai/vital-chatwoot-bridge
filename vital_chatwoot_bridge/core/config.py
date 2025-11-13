@@ -56,10 +56,10 @@ class Config:
         
         # Chatwoot API Configuration
         self.chatwoot_base_url = os.getenv('CHATWOOT_BASE_URL', '')
-        self.chatwoot_api_access_token = os.getenv('CHATWOOT_API_ACCESS_TOKEN', '')
-        self.chatwoot_user_access_token = os.getenv('CHATWOOT_USER_ACCESS_TOKEN', '')
+        self.chatwoot_api_access_token = os.getenv('CHATWOOT_API_ACCESS_TOKEN', '')  # Deprecated - kept for backward compatibility
+        self.chatwoot_user_access_token = os.getenv('CHATWOOT_USER_ACCESS_TOKEN', '')  # Main API access token
         self.chatwoot_account_id = os.getenv('CHATWOOT_ACCOUNT_ID', '1')
-        self.chatwoot_bot_webhook_secret = os.getenv('CHATWOOT_BOT_WEBHOOK_SECRET', '')
+        self.chatwoot_bot_webhook_secret = os.getenv('CHATWOOT_BOT_WEBHOOK_SECRET', '')  # Still needed for webhook security
         self.enforce_webhook_signatures = os.getenv('ENFORCE_WEBHOOK_SIGNATURES', 'true').lower() == 'true'
         
         # Chatwoot Client API Configuration (for API inboxes)
