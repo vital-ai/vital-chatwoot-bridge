@@ -122,7 +122,12 @@ class ChatwootClientAPI:
                 )
             
             response_data = create_response.json()
-            contact_data = response_data.get('payload', response_data)
+            # Handle nested payload.contact structure from Chatwoot API
+            if 'payload' in response_data and 'contact' in response_data['payload']:
+                contact_data = response_data['payload']['contact']
+            else:
+                contact_data = response_data.get('payload', response_data)
+            
             logger.info(f"Contact created successfully: {contact_data.get('id')}")
             
             return ChatwootContactResponse(
