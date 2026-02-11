@@ -9,15 +9,9 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - PORT=8000
-      - DEBUG=false
-      - HOST=0.0.0.0
-      # Chatwoot configuration
-      - CHATWOOT_BASE_URL=${CHATWOOT_BASE_URL:-}
-      - CHATWOOT_API_ACCESS_TOKEN=${CHATWOOT_API_ACCESS_TOKEN:-}
-      # Vital AI configuration
-      - VITAL_AI_BASE_URL=${VITAL_AI_BASE_URL:-}
-      - VITAL_AI_API_TOKEN=${VITAL_AI_API_TOKEN:-}
+      - CW_BRIDGE__app__port=8000
+      - CW_BRIDGE__app__host=0.0.0.0
+      - CW_BRIDGE__app__debug=false
     env_file:
       - .env
     restart: unless-stopped

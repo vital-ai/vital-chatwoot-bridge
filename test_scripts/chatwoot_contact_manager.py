@@ -47,15 +47,15 @@ class ChatwootContactManager:
         # Load .env from parent directory (project root)
         load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
         
-        self.base_url = os.getenv('CHATWOOT_BASE_URL')
+        self.base_url = os.getenv('CW_BRIDGE__chatwoot__base_url')
         # Use existing working user token for Application API access
-        self.contact_token = os.getenv('CHATWOOT_USER_ACCESS_TOKEN')
-        self.account_id = os.getenv('CHATWOOT_ACCOUNT_ID')
+        self.contact_token = os.getenv('CW_BRIDGE__chatwoot__user_access_token')
+        self.account_id = os.getenv('CW_BRIDGE__chatwoot__account_id')
         
         # Validate required environment variables
         if not all([self.base_url, self.contact_token, self.account_id]):
             print("❌ Error: Missing required environment variables:")
-            print("   CHATWOOT_BASE_URL, CHATWOOT_USER_TOKEN, CHATWOOT_ACCOUNT_ID")
+            print("   CW_BRIDGE__chatwoot__base_url, CW_BRIDGE__chatwoot__user_access_token, CW_BRIDGE__chatwoot__account_id")
             sys.exit(1)
         
         # Set up requests session with authentication

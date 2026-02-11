@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 # Load .env file in development (ECS injects env vars directly)
-if os.getenv("ENVIRONMENT") != "production":
+if os.getenv("CW_BRIDGE__app__environment") != "production":
     from dotenv import load_dotenv
     load_dotenv()
 
@@ -102,25 +102,39 @@ async def chatwoot_webhook(request: Request):
         signature = request.headers.get('X-Chatwoot-Signature')
         timestamp = request.headers.get('X-Chatwoot-Timestamp')
         
-        # Verify webhook signature
+        # Parse JSON payload (needed to extract inbox_id for bot token lookup)
+        try:
+            payload = json.loads(payload_str) if payload_str else {}
+        except json.JSONDecodeError as e:
+            logger.error(f"🔐 WEBHOOK: Invalid JSON payload: {e}")
+            raise HTTPException(status_code=400, detail="Invalid JSON payload")
+        
+        # Resolve the webhook secret: inbox_id → bot → access_token
+        inbox_id = None
+        conversation = payload.get("conversation", {})
+        if isinstance(conversation, dict):
+            inbox_id = str(conversation.get("inbox_id", ""))
+        
+        webhook_secret = ""
+        if inbox_id:
+            webhook_secret = settings.get_webhook_secret_for_inbox(inbox_id) or ""
+        
+        if not webhook_secret and settings.enforce_webhook_signatures:
+            logger.error(f"🔐 WEBHOOK: No bot token configured for inbox {inbox_id}")
+            raise HTTPException(status_code=401, detail=f"No bot token for inbox {inbox_id}")
+        
+        # Verify webhook signature with the resolved bot token
         is_valid = verify_webhook_signature(
             payload=payload_str,
             signature=signature,
             timestamp=timestamp,
-            webhook_secret=settings.chatwoot_bot_webhook_secret,
+            webhook_secret=webhook_secret,
             enforce_signatures=settings.enforce_webhook_signatures
         )
         
         if not is_valid:
             logger.error("🔐 WEBHOOK: Signature verification failed - rejecting webhook")
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
-        
-        # Parse JSON payload after signature verification
-        try:
-            payload = json.loads(payload_str) if payload_str else {}
-        except json.JSONDecodeError as e:
-            logger.error(f"🔐 WEBHOOK: Invalid JSON payload: {e}")
-            raise HTTPException(status_code=400, detail="Invalid JSON payload")
         
         if not webhook_handler:
             raise HTTPException(status_code=503, detail="Webhook handler not initialized")
@@ -166,18 +180,6 @@ async def get_status():
 app.include_router(health_router)
 app.include_router(api_inbox_router)
 app.include_router(chatwoot_management_router)
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Application startup event handler."""
-    logger.info("🚀 Vital Chatwoot Bridge starting up...")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Application shutdown event handler."""
-    logger.info("🛑 Vital Chatwoot Bridge shutting down...")
 
 
 def main():

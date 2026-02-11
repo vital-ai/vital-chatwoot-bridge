@@ -214,21 +214,21 @@ def load_app_config_from_env() -> AppAPIConfig:
     except ImportError:
         pass
     
-    base_url = os.getenv('CHATWOOT_BASE_URL')
-    user_token = os.getenv('CHATWOOT_USER_ACCESS_TOKEN')
-    account_id = os.getenv('CHATWOOT_ACCOUNT_ID')
+    base_url = os.getenv('CW_BRIDGE__chatwoot__base_url')
+    user_token = os.getenv('CW_BRIDGE__chatwoot__user_access_token')
+    account_id = os.getenv('CW_BRIDGE__chatwoot__account_id')
     
     if not base_url:
-        raise ValueError("CHATWOOT_BASE_URL environment variable is required")
+        raise ValueError("CW_BRIDGE__chatwoot__base_url environment variable is required")
     if not user_token:
-        raise ValueError("CHATWOOT_USER_ACCESS_TOKEN environment variable is required")
+        raise ValueError("CW_BRIDGE__chatwoot__user_access_token environment variable is required")
     if not account_id:
-        raise ValueError("CHATWOOT_ACCOUNT_ID environment variable is required")
+        raise ValueError("CW_BRIDGE__chatwoot__account_id environment variable is required")
     
     try:
         account_id = int(account_id)
     except ValueError:
-        raise ValueError("CHATWOOT_ACCOUNT_ID must be a valid integer")
+        raise ValueError("CW_BRIDGE__chatwoot__account_id must be a valid integer")
     
     return AppAPIConfig(base_url=base_url, user_token=user_token, account_id=account_id)
 

@@ -1,8 +1,11 @@
 """
 Configuration settings for the Vital Chatwoot Bridge application.
+
+All configuration is read from ``CW_BRIDGE__*`` environment variables parsed
+into a nested dict by :func:`parse_env_tree`.  See ``planning/config_update.md``
+for the full migration table.
 """
 
-import os
 import logging
 from typing import List, Optional, Dict, Any
 from functools import lru_cache
@@ -13,12 +16,23 @@ from vital_chatwoot_bridge.utils.env_parser import parse_env_tree, coerce_dict
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Pydantic models
+# ---------------------------------------------------------------------------
+
+class BotConfig(BaseModel):
+    """Configuration for a Chatwoot agent bot."""
+    access_token: str = Field(..., description="Bot's Chatwoot access_token (HMAC signing key)")
+    name: str = Field(default="", description="Human-readable bot name")
+
+
 class AgentConfig(BaseModel):
     """Configuration for an AI agent."""
     agent_id: str = Field(..., description="Unique identifier for the AI agent")
     websocket_url: str = Field(..., description="WebSocket URL for the AI agent")
     timeout_seconds: int = Field(default=30, description="Response timeout in seconds")
     behavior: str = Field(default="default", description="Agent behavior mode (for mock agents)")
+    bot: Optional[str] = Field(default=None, description="Reference to bot name in CW_BRIDGE__bots__")
 
 
 class InboxMapping(BaseModel):
@@ -42,61 +56,114 @@ class APIInboxConfig(BaseModel):
     hmac_secret: Optional[str] = Field(None, description="HMAC secret for webhook verification")
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _get(tree: Dict[str, Any], *path: str, default: str = "") -> str:
+    """Get a leaf value from a nested dict by path segments, returning *default* if missing."""
+    node = tree
+    for segment in path:
+        if not isinstance(node, dict) or segment not in node:
+            return default
+        node = node[segment]
+    return node if isinstance(node, str) else default
+
+
+def _get_bool(tree: Dict[str, Any], *path: str, default: bool = False) -> bool:
+    val = _get(tree, *path, default=str(default).lower())
+    return val.lower() == "true"
+
+
+def _get_int(tree: Dict[str, Any], *path: str, default: int = 0) -> int:
+    val = _get(tree, *path, default=str(default))
+    try:
+        return int(val)
+    except ValueError:
+        return default
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
 class Config:
-    """Simple configuration class that reads from environment variables."""
-    
+    """Configuration class — reads everything from CW_BRIDGE__* env vars."""
+
     def __init__(self):
-        # Application settings
-        self.app_name = "Vital Chatwoot Bridge"
-        self.debug = os.getenv('DEBUG', 'false').lower() == 'true'
-        self.host = os.getenv('HOST', '0.0.0.0')
-        self.port = int(os.getenv('PORT', '8000'))
-        
-        # CORS settings (comma-separated origins, default "*")
-        cors_env = os.getenv('CORS_ALLOWED_ORIGINS', '*')
-        self.allowed_origins = [o.strip() for o in cors_env.split(',')]
-        
-        # Chatwoot API Configuration
-        self.chatwoot_base_url = os.getenv('CHATWOOT_BASE_URL', '')
-        self.chatwoot_api_access_token = os.getenv('CHATWOOT_API_ACCESS_TOKEN', '')  # Deprecated - kept for backward compatibility
-        self.chatwoot_user_access_token = os.getenv('CHATWOOT_USER_ACCESS_TOKEN', '')  # Main API access token
-        self.chatwoot_account_id = os.getenv('CHATWOOT_ACCOUNT_ID', '1')
-        self.chatwoot_bot_webhook_secret = os.getenv('CHATWOOT_BOT_WEBHOOK_SECRET', '')  # Still needed for webhook security
-        self.enforce_webhook_signatures = os.getenv('ENFORCE_WEBHOOK_SIGNATURES', 'true').lower() == 'true'
-        
-        # Chatwoot Client API Configuration (for API inboxes)
-        self.chatwoot_client_api_base_url = os.getenv('CHATWOOT_CLIENT_API_BASE_URL', 
-                                                     f"{self.chatwoot_base_url.rstrip('/')}/public/api/v1" if self.chatwoot_base_url else '')
-        
-        # LoopMessage API Configuration
-        self.loopmessage_api_url = os.getenv('LOOPMESSAGE_API_URL', 'https://server.loopmessage.com/api/v1')
-        self.loopmessage_authorization_key = os.getenv('LOOPMESSAGE_AUTHORIZATION_KEY', '')
-        self.loopmessage_secret_key = os.getenv('LOOPMESSAGE_SECRET_KEY', '')
-        self.loopmessage_sender_name = os.getenv('LOOPMESSAGE_SENDER_NAME', '')
-        
-        # Keycloak Configuration for JWT tokens
-        self.keycloak_realm = os.getenv('KEYCLOAK_REALM', '')
-        self.keycloak_client_id = os.getenv('KEYCLOAK_CLIENT_ID', '')
-        self.keycloak_client_secret = os.getenv('KEYCLOAK_CLIENT_SECRET', '')
-        self.keycloak_user = os.getenv('KEYCLOAK_USER', '')
-        self.keycloak_password = os.getenv('KEYCLOAK_PASSWORD', '')
-        self.keycloak_base_url = os.getenv('KEYCLOAK_BASE_URL', 'http://localhost:8085')
-        
-        # Response Configuration
-        self.default_response_timeout = int(os.getenv('DEFAULT_RESPONSE_TIMEOUT', '30'))
-        self.max_sync_response_time = int(os.getenv('MAX_SYNC_RESPONSE_TIME', '25'))
-        
-        # WebSocket Configuration
-        self.websocket_connect_timeout = int(os.getenv('WEBSOCKET_CONNECT_TIMEOUT', '10'))
-        self.websocket_ping_interval = int(os.getenv('WEBSOCKET_PING_INTERVAL', '30'))
-        self.websocket_ping_timeout = int(os.getenv('WEBSOCKET_PING_TIMEOUT', '10'))
-        self.websocket_max_reconnect_attempts = int(os.getenv('WEBSOCKET_MAX_RECONNECT_ATTEMPTS', '5'))
-        
-        # Parse hierarchical config from CW_BRIDGE__* env vars
         env_tree = parse_env_tree("CW_BRIDGE")
+
+        # -- App settings (CW_BRIDGE__app__*) --
+        self.app_name = "Vital Chatwoot Bridge"
+        self.debug = _get_bool(env_tree, "app", "debug", default=False)
+        self.host = _get(env_tree, "app", "host", default="0.0.0.0")
+        self.port = _get_int(env_tree, "app", "port", default=8000)
+        self.log_level = _get(env_tree, "app", "log_level", default="INFO")
+        self.log_format = _get(env_tree, "app", "log_format", default="text")
+        self.environment = _get(env_tree, "app", "environment", default="development")
+        cors_env = _get(env_tree, "app", "cors_allowed_origins", default="*")
+        self.allowed_origins = [o.strip() for o in cors_env.split(",")]
+
+        # -- Chatwoot (CW_BRIDGE__chatwoot__*) --
+        self.chatwoot_base_url = _get(env_tree, "chatwoot", "base_url")
+        self.chatwoot_user_access_token = _get(env_tree, "chatwoot", "user_access_token")
+        self.chatwoot_account_id = _get(env_tree, "chatwoot", "account_id", default="1")
+        self.enforce_webhook_signatures = _get_bool(env_tree, "chatwoot", "enforce_webhook_signatures", default=True)
+        client_api = _get(env_tree, "chatwoot", "client_api_base_url")
+        self.chatwoot_client_api_base_url = (
+            client_api if client_api
+            else f"{self.chatwoot_base_url.rstrip('/')}/public/api/v1" if self.chatwoot_base_url
+            else ""
+        )
+
+        # -- Keycloak (CW_BRIDGE__keycloak__*) --
+        self.keycloak_base_url = _get(env_tree, "keycloak", "base_url", default="http://localhost:8085")
+        self.keycloak_realm = _get(env_tree, "keycloak", "realm")
+        self.keycloak_client_id = _get(env_tree, "keycloak", "client_id")
+        self.keycloak_client_secret = _get(env_tree, "keycloak", "client_secret")
+        self.keycloak_user = _get(env_tree, "keycloak", "user")
+        self.keycloak_password = _get(env_tree, "keycloak", "password")
+
+        # -- LoopMessage (CW_BRIDGE__loopmessage__*) --
+        self.loopmessage_api_url = _get(env_tree, "loopmessage", "api_url", default="https://server.loopmessage.com/api/v1")
+        self.loopmessage_authorization_key = _get(env_tree, "loopmessage", "authorization_key")
+        self.loopmessage_secret_key = _get(env_tree, "loopmessage", "secret_key")
+        self.loopmessage_sender_name = _get(env_tree, "loopmessage", "sender_name")
+
+        # -- Timeouts (CW_BRIDGE__timeouts__*) --
+        self.default_response_timeout = _get_int(env_tree, "timeouts", "response", default=30)
+        self.max_sync_response_time = _get_int(env_tree, "timeouts", "max_sync", default=25)
+
+        # -- WebSocket (CW_BRIDGE__websocket__*) --
+        self.websocket_connect_timeout = _get_int(env_tree, "websocket", "connect_timeout", default=10)
+        self.websocket_ping_interval = _get_int(env_tree, "websocket", "ping_interval", default=30)
+        self.websocket_ping_timeout = _get_int(env_tree, "websocket", "ping_timeout", default=10)
+        self.websocket_max_reconnect_attempts = _get_int(env_tree, "websocket", "max_reconnect_attempts", default=5)
+
+        # -- Structured config sections --
+        self.bots = self._parse_bots(env_tree.get("bots", {}))
         self.inbox_agent_mappings = self._parse_inbox_agents(env_tree.get("inbox_agents", {}))
         self.api_inboxes = self._parse_api_inboxes(env_tree.get("api_inboxes", {}))
-    
+
+    # -------------------------------------------------------------------
+    # Parsers for structured sections
+    # -------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_bots(bots_tree: Dict[str, Any]) -> Dict[str, BotConfig]:
+        """Build BotConfig dict from CW_BRIDGE__bots__<name>__* env vars."""
+        bots: Dict[str, BotConfig] = {}
+        for bot_name, fields in bots_tree.items():
+            if not isinstance(fields, dict):
+                continue
+            try:
+                bots[bot_name] = BotConfig(**fields)
+                logger.info(f"📋 CONFIG: Loaded bot '{bot_name}': {fields.get('name', bot_name)}")
+            except Exception as e:
+                logger.error(f"❌ CONFIG: Failed to parse bot config for '{bot_name}': {e}")
+        logger.info(f"📋 CONFIG: {len(bots)} bot configurations loaded")
+        return bots
+
     @staticmethod
     def _parse_inbox_agents(agents_tree: Dict[str, Any]) -> List[InboxMapping]:
         """Build InboxMapping list from CW_BRIDGE__inbox_agents__<id>__* env vars."""
@@ -113,7 +180,7 @@ class Config:
                 logger.error(f"❌ CONFIG: Failed to parse inbox agent mapping for inbox {inbox_id}: {e}")
         logger.info(f"📋 CONFIG: {len(mappings)} inbox agent mappings loaded")
         return mappings
-    
+
     @staticmethod
     def _parse_api_inboxes(inboxes_tree: Dict[str, Any]) -> Dict[str, APIInboxConfig]:
         """Build APIInboxConfig dict from CW_BRIDGE__api_inboxes__<type>__* env vars."""
@@ -136,32 +203,45 @@ class Config:
                 logger.error(f"❌ CONFIG: Failed to parse API inbox config for '{inbox_type}': {e}")
         logger.info(f"📋 CONFIG: {len(api_inboxes)} API inbox configurations loaded")
         return api_inboxes
-    
+
+    # -------------------------------------------------------------------
+    # Lookup helpers
+    # -------------------------------------------------------------------
+
     def get_agent_for_inbox(self, inbox_id: str) -> Optional[AgentConfig]:
         """Get the AI agent configuration for a specific inbox."""
         for mapping in self.inbox_agent_mappings:
             if mapping.inbox_id == inbox_id:
                 return mapping.agent_config
         return None
-    
+
+    def get_webhook_secret_for_inbox(self, inbox_id: str) -> Optional[str]:
+        """Look up inbox → bot → access_token for webhook signature verification."""
+        agent_config = self.get_agent_for_inbox(inbox_id)
+        if agent_config and agent_config.bot:
+            bot = self.bots.get(agent_config.bot)
+            if bot:
+                return bot.access_token
+        return None
+
     def get_api_inbox_config(self, inbox_type: str) -> Optional[APIInboxConfig]:
         """Get the API inbox configuration for a specific inbox type."""
         return self.api_inboxes.get(inbox_type)
-    
+
     def get_api_inbox_by_identifier(self, inbox_identifier: str) -> Optional[APIInboxConfig]:
         """Get the API inbox configuration by Chatwoot inbox identifier."""
         for config in self.api_inboxes.values():
             if config.inbox_identifier == inbox_identifier:
                 return config
         return None
-    
+
     def get_api_inbox_by_chatwoot_id(self, chatwoot_inbox_id: str) -> Optional[APIInboxConfig]:
         """Get the API inbox configuration by Chatwoot internal inbox ID."""
         for config in self.api_inboxes.values():
             if config.chatwoot_inbox_id == chatwoot_inbox_id:
                 return config
         return None
-    
+
 
 @lru_cache()
 def get_settings() -> Config:

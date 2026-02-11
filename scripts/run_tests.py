@@ -210,7 +210,6 @@ class ServiceManager:
     
     def _parse_required_agents(self):
         """Parse configuration to determine which unique agents need to be spawned."""
-        import json
         import os
         from urllib.parse import urlparse
         from pathlib import Path
@@ -230,56 +229,50 @@ class ServiceManager:
                             value = value[1:-1]
                         os.environ[key] = value
         
-        # Get configuration from environment
-        mappings_json = os.getenv('INBOX_AGENT_MAPPINGS', '[]')
-        logger.info(f"🔍 TEST_RUNNER: Raw INBOX_AGENT_MAPPINGS env var: {mappings_json[:200]}..." if len(mappings_json) > 200 else f"🔍 TEST_RUNNER: Raw INBOX_AGENT_MAPPINGS env var: {mappings_json}")
+        # Parse CW_BRIDGE__inbox_agents__* env vars to find unique agents
+        from vital_chatwoot_bridge.utils.env_parser import parse_env_tree
+        env_tree = parse_env_tree("CW_BRIDGE")
+        agents_tree = env_tree.get("inbox_agents", {})
         
-        try:
-            mappings_data = json.loads(mappings_json)
-            logger.info(f"🔍 TEST_RUNNER: Parsed {len(mappings_data)} mappings from JSON")
-            unique_agents = {}
+        unique_agents = {}
+        for inbox_id, fields in agents_tree.items():
+            if not isinstance(fields, dict):
+                continue
+            websocket_url = fields.get('websocket_url', '')
+            agent_id = fields.get('agent_id', '')
             
-            for mapping in mappings_data:
-                agent_config = mapping.get('agent_config', {})
-                websocket_url = agent_config.get('websocket_url', '')
-                agent_id = agent_config.get('agent_id', '')
+            if websocket_url and agent_id:
+                parsed = urlparse(websocket_url)
+                host = parsed.hostname or 'localhost'
+                port = parsed.port
                 
-                if websocket_url and agent_id:
-                    # Parse URL to get host and port
-                    parsed = urlparse(websocket_url)
-                    host = parsed.hostname or 'localhost'
-                    port = parsed.port
+                if port:
+                    behavior = 'echo'  # default
+                    if 'delay' in agent_id.lower() or port == 8086:
+                        behavior = 'delay'
+                    elif 'error' in agent_id.lower() or port == 8087:
+                        behavior = 'error'
                     
-                    if port:
-                        # Determine behavior based on agent_id or port (fallback logic)
-                        behavior = 'echo'  # default
-                        if 'delay' in agent_id.lower() or port == 8086:
-                            behavior = 'delay'
-                        elif 'error' in agent_id.lower() or port == 8087:
-                            behavior = 'error'
-                        
-                        # Use websocket_url as key to ensure uniqueness
-                        unique_agents[websocket_url] = {
-                            'agent_id': agent_id,
-                            'host': host,
-                            'port': port,
-                            'behavior': behavior
-                        }
-            
-            logger.info(f"📋 TEST_RUNNER: Found {len(unique_agents)} unique agents to spawn")
-            for url, config in unique_agents.items():
-                logger.info(f"   TEST_RUNNER: {config['agent_id']} -> {url} ({config['behavior']})")
-            
-            return list(unique_agents.values())
-            
-        except (json.JSONDecodeError, KeyError) as e:
-            logger.error(f"❌ TEST_RUNNER: Failed to parse agent configuration: {e}")
-            # Fallback to default agents for testing
+                    unique_agents[websocket_url] = {
+                        'agent_id': agent_id,
+                        'host': host,
+                        'port': port,
+                        'behavior': behavior
+                    }
+        
+        logger.info(f"📋 TEST_RUNNER: Found {len(unique_agents)} unique agents to spawn")
+        for url, config in unique_agents.items():
+            logger.info(f"   TEST_RUNNER: {config['agent_id']} -> {url} ({config['behavior']})")
+        
+        if not unique_agents:
+            logger.warning("⚠️  TEST_RUNNER: No agents found in CW_BRIDGE__inbox_agents__, using defaults")
             return [
                 {'agent_id': 'agent_1', 'host': 'localhost', 'port': 8085, 'behavior': 'echo'},
                 {'agent_id': 'agent_2', 'host': 'localhost', 'port': 8086, 'behavior': 'delay'},
                 {'agent_id': 'agent_3', 'host': 'localhost', 'port': 8087, 'behavior': 'error'}
             ]
+        
+        return list(unique_agents.values())
     
     async def start_all_services(self):
         """Start all required services for testing."""

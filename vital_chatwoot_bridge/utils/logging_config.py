@@ -41,7 +41,7 @@ def setup_logging(
     """
     # Get log level from parameter, environment, or default to INFO
     if level is None:
-        level = os.getenv('LOG_LEVEL', 'INFO').upper()
+        level = os.getenv('CW_BRIDGE__app__log_level', 'INFO').upper()
     
     # Default format string
     if format_string is None:
@@ -66,7 +66,7 @@ def setup_logging(
         root_logger.handlers.clear()
     
     # Configure logging
-    log_format = os.getenv('LOG_FORMAT', 'text').lower()
+    log_format = os.getenv('CW_BRIDGE__app__log_format', 'text').lower()
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(numeric_level)
     if log_format == 'json':

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Script to set configuration environment variables for local testing and AWS deployment.
+DEPRECATED: This script uses the old flat env var format (CHATWOOT_BASE_URL, etc.).
+All configuration has been migrated to the CW_BRIDGE__ hierarchical prefix.
+See env.example for the current format. This script is kept for reference only.
 """
 
 import json

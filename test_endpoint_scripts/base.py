@@ -48,12 +48,12 @@ def get_test_config() -> Dict[str, str]:
     """Load all test-related env vars into a dict."""
     return {
         "bridge_base_url": get_env("BRIDGE_BASE_URL", "http://localhost:8009"),
-        "keycloak_base_url": get_env("KEYCLOAK_CLIENT_BASE_URL") or get_env_required("KEYCLOAK_BASE_URL"),
-        "keycloak_realm": get_env_required("KEYCLOAK_REALM"),
-        "keycloak_client_id": get_env_required("KEYCLOAK_CLIENT_ID"),
-        "keycloak_client_secret": get_env("KEYCLOAK_CLIENT_SECRET", ""),
-        "keycloak_user": get_env("KEYCLOAK_USER", ""),
-        "keycloak_password": get_env("KEYCLOAK_PASSWORD", ""),
+        "keycloak_base_url": get_env("KEYCLOAK_CLIENT_BASE_URL") or get_env_required("CW_BRIDGE__keycloak__base_url"),
+        "keycloak_realm": get_env_required("CW_BRIDGE__keycloak__realm"),
+        "keycloak_client_id": get_env_required("CW_BRIDGE__keycloak__client_id"),
+        "keycloak_client_secret": get_env("CW_BRIDGE__keycloak__client_secret", ""),
+        "keycloak_user": get_env("CW_BRIDGE__keycloak__user", ""),
+        "keycloak_password": get_env("CW_BRIDGE__keycloak__password", ""),
         "test_sms_recipient": get_env("TEST_SMS_RECIPIENT", ""),
         "test_email_recipient": get_env("TEST_EMAIL_RECIPIENT", ""),
         "test_contact_name": get_env("TEST_CONTACT_NAME", "Test User"),

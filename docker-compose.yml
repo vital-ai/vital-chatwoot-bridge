@@ -9,26 +9,9 @@ services:
     ports:
       - "8009:8009"
     environment:
-      - PORT=8009
-      - DEBUG=false
-      - HOST=0.0.0.0
-      # Chatwoot configuration
-      - CHATWOOT_BASE_URL=${CHATWOOT_BASE_URL:-}
-      - CHATWOOT_API_ACCESS_TOKEN=${CHATWOOT_API_ACCESS_TOKEN:-}
-      - CHATWOOT_USER_ACCESS_TOKEN=${CHATWOOT_USER_ACCESS_TOKEN:-}
-      - CHATWOOT_ACCOUNT_ID=${CHATWOOT_ACCOUNT_ID:-1}
-      # Vital AI configuration
-      - VITAL_AI_BASE_URL=${VITAL_AI_BASE_URL:-}
-      - VITAL_AI_API_TOKEN=${VITAL_AI_API_TOKEN:-}
-      - CHATWOOT_BOT_WEBHOOK_SECRET=${CHATWOOT_BOT_WEBHOOK_SECRET}
-      - ENFORCE_WEBHOOK_SIGNATURES=${ENFORCE_WEBHOOK_SIGNATURES:-true}
-      # Keycloak configuration for JWT authentication
-      - KEYCLOAK_REALM=${KEYCLOAK_REALM:-}
-      - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID:-}
-      - KEYCLOAK_CLIENT_SECRET=${KEYCLOAK_CLIENT_SECRET:-}
-      - KEYCLOAK_USER=${KEYCLOAK_USER:-}
-      - KEYCLOAK_PASSWORD=${KEYCLOAK_PASSWORD:-}
-      - KEYCLOAK_BASE_URL=${KEYCLOAK_BASE_URL:-http://host.docker.internal:8085}
+      - CW_BRIDGE__app__port=8009
+      - CW_BRIDGE__app__host=0.0.0.0
+      - CW_BRIDGE__app__debug=false
       
     env_file:
       - .env
