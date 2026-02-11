@@ -33,15 +33,46 @@ class ChatwootAPIClient:
     
     def __init__(self):
         self.settings = get_settings()
+        # Retry transport for transient failures on idempotent requests
+        transport = httpx.AsyncHTTPTransport(retries=3)
         self.client = httpx.AsyncClient(
+            transport=transport,
             timeout=httpx.Timeout(30.0),
             headers={
                 "api_access_token": self.settings.chatwoot_user_access_token,
                 "Content-Type": "application/json"
-            }
+            },
+            event_hooks={"response": [self._on_response]},
         )
         self.base_url = self.settings.chatwoot_base_url.rstrip('/')
+
+    @staticmethod
+    async def _on_response(response: httpx.Response) -> None:
+        """Event hook: log every Chatwoot API response for debugging."""
+        request = response.request
+        method = request.method
+        url = str(request.url)
+        status = response.status_code
+        # Read body so it's available for later .json() calls
+        await response.aread()
+        body = response.text[:500] if response.content else ""
+        if status >= 400:
+            logger.warning(
+                "[CHATWOOT_API] %s %s -> %d | %s", method, url, status, body
+            )
+        else:
+            logger.debug(
+                "[CHATWOOT_API] %s %s -> %d | %s", method, url, status, body[:200]
+            )
     
+    @staticmethod
+    def _safe_json(response) -> Optional[Dict]:
+        """Try to parse response JSON, return None on failure."""
+        try:
+            return response.json()
+        except Exception:
+            return None
+
     async def __aenter__(self):
         """Async context manager entry."""
         return self
@@ -403,6 +434,493 @@ class ChatwootAPIClient:
             logger.error(f"Chatwoot API health check error: {e}")
             return False
     
+    # ── Management API methods ─────────────────────────────────────────
+
+    async def list_contacts(
+        self,
+        account_id: int,
+        page: int = 1,
+        per_page: int = 25,
+        sort: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """List contacts with pagination. Returns raw API response dict."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/contacts"
+        params = {"page": page}
+        if sort:
+            params["sort"] = sort
+        # Chatwoot uses 15 per page by default; we pass our per_page preference
+        # but Chatwoot may not honor it — we document this in response
+        try:
+            response = await self.client.get(url, params=params)
+            if response.status_code == 200:
+                return response.json()
+            body = response.text[:500]
+            raise ChatwootAPIError(
+                f"Failed to list contacts: HTTP {response.status_code}: {body}",
+                status_code=response.status_code,
+                response_data=self._safe_json(response)
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error listing contacts: {e}")
+
+    async def search_contacts(
+        self,
+        account_id: int,
+        q: Optional[str] = None,
+        page: int = 1
+    ) -> Dict[str, Any]:
+        """Search contacts. Returns raw API response dict."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/contacts/search"
+        params = {"page": page}
+        if q:
+            params["q"] = q
+        try:
+            response = await self.client.get(url, params=params)
+            if response.status_code == 200:
+                return response.json()
+            body = response.text[:500]
+            raise ChatwootAPIError(
+                f"Failed to search contacts: HTTP {response.status_code}: {body}",
+                status_code=response.status_code,
+                response_data=self._safe_json(response)
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error searching contacts: {e}")
+
+    async def get_contact(
+        self,
+        account_id: int,
+        contact_id: int
+    ) -> Dict[str, Any]:
+        """Get contact details. Returns raw API response dict."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/contacts/{contact_id}"
+        try:
+            response = await self.client.get(url)
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404:
+                raise ChatwootAPIError("Contact not found", status_code=404)
+            body = response.text[:500]
+            raise ChatwootAPIError(
+                f"Failed to get contact: HTTP {response.status_code}: {body}",
+                status_code=response.status_code,
+                response_data=self._safe_json(response)
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error getting contact: {e}")
+
+    async def get_contact_conversations(
+        self,
+        account_id: int,
+        contact_id: int,
+        page: int = 1
+    ) -> Dict[str, Any]:
+        """Get conversations for a contact. Returns raw API response dict."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/contacts/{contact_id}/conversations"
+        params = {"page": page}
+        try:
+            response = await self.client.get(url, params=params)
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404:
+                raise ChatwootAPIError("Contact not found", status_code=404)
+            body = response.text[:500]
+            raise ChatwootAPIError(
+                f"Failed to get contact conversations: HTTP {response.status_code}: {body}",
+                status_code=response.status_code,
+                response_data=self._safe_json(response)
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error getting contact conversations: {e}")
+
+    async def create_contact_raw(
+        self,
+        account_id: int,
+        data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Create a contact. Returns raw API response dict."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/contacts"
+        try:
+            response = await self.client.post(url, json=data)
+            if response.status_code in [200, 201]:
+                return response.json()
+            body = response.text[:500]
+            raise ChatwootAPIError(
+                f"Failed to create contact: HTTP {response.status_code}: {body}",
+                status_code=response.status_code,
+                response_data=self._safe_json(response)
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error creating contact: {e}")
+
+    async def delete_contact_raw(
+        self,
+        account_id: int,
+        contact_id: int
+    ) -> Dict[str, Any]:
+        """Delete a contact. Returns empty dict on success."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/contacts/{contact_id}"
+        try:
+            response = await self.client.delete(url)
+            if response.status_code in [200, 204]:
+                return response.json() if response.content else {}
+            elif response.status_code == 404:
+                raise ChatwootAPIError("Contact not found", status_code=404)
+            body = response.text[:500]
+            raise ChatwootAPIError(
+                f"Failed to delete contact: HTTP {response.status_code}: {body}",
+                status_code=response.status_code,
+                response_data=self._safe_json(response)
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error deleting contact: {e}")
+
+    async def delete_conversation_raw(
+        self,
+        account_id: int,
+        conversation_id: int
+    ) -> Dict[str, Any]:
+        """Delete a conversation. Returns empty dict on success."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/{conversation_id}"
+        try:
+            response = await self.client.delete(url)
+            if response.status_code in [200, 204]:
+                return response.json() if response.content else {}
+            elif response.status_code == 404:
+                raise ChatwootAPIError("Conversation not found", status_code=404)
+            body = response.text[:500]
+            raise ChatwootAPIError(
+                f"Failed to delete conversation: HTTP {response.status_code}: {body}",
+                status_code=response.status_code,
+                response_data=self._safe_json(response)
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error deleting conversation: {e}")
+
+    async def create_conversation_raw(
+        self,
+        account_id: int,
+        data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Create a conversation. Returns raw API response dict."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations"
+        try:
+            response = await self.client.post(url, json=data)
+            if response.status_code in [200, 201]:
+                return response.json()
+            body = response.text[:500]
+            raise ChatwootAPIError(
+                f"Failed to create conversation: HTTP {response.status_code}: {body}",
+                status_code=response.status_code,
+                response_data=self._safe_json(response)
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error creating conversation: {e}")
+
+    async def list_agents(
+        self,
+        account_id: int
+    ) -> List[Dict[str, Any]]:
+        """List all agents. Returns list of agent dicts."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/agents"
+        try:
+            response = await self.client.get(url)
+            if response.status_code == 200:
+                return response.json()
+            body = response.text[:500]
+            raise ChatwootAPIError(
+                f"Failed to list agents: HTTP {response.status_code}: {body}",
+                status_code=response.status_code,
+                response_data=self._safe_json(response)
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error listing agents: {e}")
+
+    async def list_inboxes(
+        self,
+        account_id: int
+    ) -> Dict[str, Any]:
+        """List all inboxes. Returns raw API response dict."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/inboxes"
+        try:
+            response = await self.client.get(url)
+            if response.status_code == 200:
+                return response.json()
+            body = response.text[:500]
+            raise ChatwootAPIError(
+                f"Failed to list inboxes: HTTP {response.status_code}: {body}",
+                status_code=response.status_code,
+                response_data=self._safe_json(response)
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error listing inboxes: {e}")
+
+    async def get_message(
+        self,
+        account_id: int,
+        conversation_id: int,
+        message_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """Get a single message by scanning conversation messages."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages"
+        try:
+            response = await self.client.get(url)
+            if response.status_code == 200:
+                data = response.json()
+                for msg in data.get("payload", []):
+                    if msg.get("id") == message_id:
+                        return msg
+                raise ChatwootAPIError("Message not found", status_code=404)
+            body = response.text[:500]
+            raise ChatwootAPIError(
+                f"Failed to get messages: HTTP {response.status_code}: {body}",
+                status_code=response.status_code,
+                response_data=self._safe_json(response)
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error getting message: {e}")
+
+    async def delete_message_raw(
+        self,
+        account_id: int,
+        conversation_id: int,
+        message_id: int
+    ) -> Dict[str, Any]:
+        """Delete a message. Returns empty dict on success."""
+        url = (
+            f"{self.base_url}/api/v1/accounts/{account_id}"
+            f"/conversations/{conversation_id}/messages/{message_id}"
+        )
+        try:
+            response = await self.client.delete(url)
+            if response.status_code in [200, 204]:
+                return response.json() if response.content else {}
+            elif response.status_code == 404:
+                raise ChatwootAPIError("Message not found", status_code=404)
+            body = response.text[:500]
+            raise ChatwootAPIError(
+                f"Failed to delete message: HTTP {response.status_code}: {body}",
+                status_code=response.status_code,
+                response_data=self._safe_json(response)
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error deleting message: {e}")
+
+    async def get_conversation_messages_raw(
+        self,
+        account_id: int,
+        conversation_id: int
+    ) -> Dict[str, Any]:
+        """Get messages for a conversation. Returns raw API response dict."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages"
+        try:
+            response = await self.client.get(url)
+            if response.status_code == 200:
+                return response.json()
+            body = response.text[:500]
+            raise ChatwootAPIError(
+                f"Failed to get messages: HTTP {response.status_code}: {body}",
+                status_code=response.status_code,
+                response_data=self._safe_json(response)
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error getting messages: {e}")
+
+    async def get_conversation_raw(
+        self,
+        account_id: int,
+        conversation_id: int
+    ) -> Dict[str, Any]:
+        """Get conversation details. Returns raw API response dict."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/{conversation_id}"
+        try:
+            response = await self.client.get(url)
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404:
+                raise ChatwootAPIError("Conversation not found", status_code=404)
+            raise ChatwootAPIError(
+                f"Failed to get conversation: HTTP {response.status_code}",
+                status_code=response.status_code
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error getting conversation: {e}")
+
+    async def list_conversations_raw(
+        self,
+        account_id: int,
+        page: int = 1,
+        status: Optional[str] = None,
+        assignee_type: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """List conversations. Returns raw API response dict."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations"
+        params = {"page": page}
+        if status:
+            params["status"] = status
+        if assignee_type:
+            params["assignee_type"] = assignee_type
+        try:
+            response = await self.client.get(url, params=params)
+            if response.status_code == 200:
+                return response.json()
+            raise ChatwootAPIError(
+                f"Failed to list conversations: HTTP {response.status_code}",
+                status_code=response.status_code
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error listing conversations: {e}")
+
+    async def send_message_raw(
+        self,
+        account_id: int,
+        conversation_id: int,
+        data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Send a message with arbitrary payload. Returns raw API response dict."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages"
+        try:
+            response = await self.client.post(url, json=data)
+            if response.status_code == 200:
+                return response.json()
+            raise ChatwootAPIError(
+                f"Failed to send message: HTTP {response.status_code}",
+                status_code=response.status_code,
+                response_data=response.json() if response.content else None
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error sending message: {e}")
+
+    async def update_contact_raw(
+        self,
+        account_id: int,
+        contact_id: int,
+        data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Update a contact. Returns raw API response dict."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/contacts/{contact_id}"
+        try:
+            response = await self.client.patch(url, json=data)
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404:
+                raise ChatwootAPIError("Contact not found", status_code=404)
+            body = response.text[:500]
+            raise ChatwootAPIError(
+                f"Failed to update contact: HTTP {response.status_code}: {body}",
+                status_code=response.status_code,
+                response_data=self._safe_json(response)
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error updating contact: {e}")
+
+    async def merge_contacts_raw(
+        self,
+        account_id: int,
+        base_contact_id: int,
+        mergee_contact_id: int
+    ) -> Dict[str, Any]:
+        """Merge two contacts. The mergee is merged into the base contact."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/actions/contact_merge"
+        payload = {
+            "base_contact_id": base_contact_id,
+            "mergee_contact_id": mergee_contact_id,
+        }
+        try:
+            response = await self.client.post(url, json=payload)
+            if response.status_code == 200:
+                return response.json()
+            body = response.text[:500]
+            raise ChatwootAPIError(
+                f"Failed to merge contacts: HTTP {response.status_code}: {body}",
+                status_code=response.status_code,
+                response_data=self._safe_json(response)
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error merging contacts: {e}")
+
+    async def update_conversation_raw(
+        self,
+        account_id: int,
+        conversation_id: int,
+        data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Update a conversation (status, assignee, etc.). Returns raw API response dict."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/{conversation_id}"
+        try:
+            response = await self.client.patch(url, json=data)
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404:
+                raise ChatwootAPIError("Conversation not found", status_code=404)
+            body = response.text[:500]
+            raise ChatwootAPIError(
+                f"Failed to update conversation: HTTP {response.status_code}: {body}",
+                status_code=response.status_code,
+                response_data=self._safe_json(response)
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error updating conversation: {e}")
+
+    async def get_conversation_counts_raw(
+        self,
+        account_id: int,
+    ) -> Dict[str, Any]:
+        """Get conversation counts by status. Returns raw meta dict."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations"
+        counts = {}
+        for conv_status in ("open", "resolved", "pending", "snoozed"):
+            try:
+                response = await self.client.get(url, params={"status": conv_status, "page": 1})
+                if response.status_code == 200:
+                    data = response.json()
+                    meta = data.get("data", {}).get("meta", {})
+                    counts[conv_status] = meta.get("all_count", 0)
+                else:
+                    counts[conv_status] = 0
+            except Exception:
+                counts[conv_status] = 0
+        counts["total"] = sum(counts.values())
+        return counts
+
     async def close(self):
         """Close the HTTP client."""
         await self.client.aclose()

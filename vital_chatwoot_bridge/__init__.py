@@ -1,7 +1,8 @@
 """
-Vital Chatwoot Bridge - A bridge service connecting Vital AI to Chatwoot.
+Vital Chatwoot Bridge - Bridge service connecting Chatwoot with AI agents,
+with a REST management API and async Python client library.
 """
 
 __version__ = "0.1.0"
-__author__ = "Your Name"
-__email__ = "your.email@example.com"
+__author__ = "Vital AI"
+__email__ = "info@vital.ai"

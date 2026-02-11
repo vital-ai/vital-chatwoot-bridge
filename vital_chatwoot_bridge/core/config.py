@@ -3,11 +3,12 @@ Configuration settings for the Vital Chatwoot Bridge application.
 """
 
 import os
-import json
 import logging
 from typing import List, Optional, Dict, Any
 from functools import lru_cache
 from pydantic import BaseModel, Field
+
+from vital_chatwoot_bridge.utils.env_parser import parse_env_tree, coerce_dict
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +52,9 @@ class Config:
         self.host = os.getenv('HOST', '0.0.0.0')
         self.port = int(os.getenv('PORT', '8000'))
         
-        # CORS settings
-        self.allowed_origins = ["*"]
+        # CORS settings (comma-separated origins, default "*")
+        cors_env = os.getenv('CORS_ALLOWED_ORIGINS', '*')
+        self.allowed_origins = [o.strip() for o in cors_env.split(',')]
         
         # Chatwoot API Configuration
         self.chatwoot_base_url = os.getenv('CHATWOOT_BASE_URL', '')
@@ -66,8 +68,7 @@ class Config:
         self.chatwoot_client_api_base_url = os.getenv('CHATWOOT_CLIENT_API_BASE_URL', 
                                                      f"{self.chatwoot_base_url.rstrip('/')}/public/api/v1" if self.chatwoot_base_url else '')
         
-        # API Inbox Configuration
-        self.api_inboxes_config_path = os.getenv('CHATWOOT_API_INBOXES_CONFIG_PATH', '')
+        # LoopMessage API Configuration
         self.loopmessage_api_url = os.getenv('LOOPMESSAGE_API_URL', 'https://server.loopmessage.com/api/v1')
         self.loopmessage_authorization_key = os.getenv('LOOPMESSAGE_AUTHORIZATION_KEY', '')
         self.loopmessage_secret_key = os.getenv('LOOPMESSAGE_SECRET_KEY', '')
@@ -91,53 +92,50 @@ class Config:
         self.websocket_ping_timeout = int(os.getenv('WEBSOCKET_PING_TIMEOUT', '10'))
         self.websocket_max_reconnect_attempts = int(os.getenv('WEBSOCKET_MAX_RECONNECT_ATTEMPTS', '5'))
         
-        # Parse inbox agent mappings from JSON
-        self.inbox_agent_mappings = self._parse_inbox_mappings()
-        
-        # Parse API inbox configurations
-        self.api_inboxes = self._parse_api_inboxes()
+        # Parse hierarchical config from CW_BRIDGE__* env vars
+        env_tree = parse_env_tree("CW_BRIDGE")
+        self.inbox_agent_mappings = self._parse_inbox_agents(env_tree.get("inbox_agents", {}))
+        self.api_inboxes = self._parse_api_inboxes(env_tree.get("api_inboxes", {}))
     
-    def _parse_inbox_mappings(self) -> List[InboxMapping]:
-        """Parse inbox mappings from JSON environment variable."""
-        mappings_json = os.getenv('INBOX_AGENT_MAPPINGS', '[]')
-        logger.info(f"📋 CONFIG: Loading INBOX_AGENT_MAPPINGS: {mappings_json[:100]}..." if len(mappings_json) > 100 else f"📋 CONFIG: Loading INBOX_AGENT_MAPPINGS: {mappings_json}")
-        try:
-            mappings_data = json.loads(mappings_json)
-            logger.info(f"📋 CONFIG: Parsed {len(mappings_data)} inbox mappings from JSON")
-            mappings = [InboxMapping(**mapping) for mapping in mappings_data]
-            logger.info(f"📋 CONFIG: Created {len(mappings)} InboxMapping objects successfully")
-            return mappings
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.error(f"❌ CONFIG: Failed to parse INBOX_AGENT_MAPPINGS JSON: {e}")
-            return []
+    @staticmethod
+    def _parse_inbox_agents(agents_tree: Dict[str, Any]) -> List[InboxMapping]:
+        """Build InboxMapping list from CW_BRIDGE__inbox_agents__<id>__* env vars."""
+        mappings: List[InboxMapping] = []
+        for inbox_id, fields in agents_tree.items():
+            if not isinstance(fields, dict):
+                continue
+            try:
+                agent_fields = coerce_dict(fields)
+                agent_config = AgentConfig(**agent_fields)
+                mappings.append(InboxMapping(inbox_id=inbox_id, agent_config=agent_config))
+                logger.info(f"📋 CONFIG: Loaded inbox agent mapping: inbox {inbox_id} → {agent_config.agent_id}")
+            except Exception as e:
+                logger.error(f"❌ CONFIG: Failed to parse inbox agent mapping for inbox {inbox_id}: {e}")
+        logger.info(f"📋 CONFIG: {len(mappings)} inbox agent mappings loaded")
+        return mappings
     
-    def _parse_api_inboxes(self) -> Dict[str, APIInboxConfig]:
-        """Parse API inbox configurations from JSON file or environment."""
-        if not self.api_inboxes_config_path:
-            logger.info("📋 CONFIG: No API inboxes config path specified")
-            return {}
-        
-        try:
-            if os.path.exists(self.api_inboxes_config_path):
-                with open(self.api_inboxes_config_path, 'r') as f:
-                    config_data = json.load(f)
-            else:
-                # Try to load from environment variable as fallback
-                config_json = os.getenv('API_INBOXES_CONFIG', '{}')
-                config_data = json.loads(config_json)
-            
-            logger.info(f"📋 CONFIG: Loading {len(config_data)} API inbox configurations")
-            
-            api_inboxes = {}
-            for inbox_type, config in config_data.items():
-                api_inboxes[inbox_type] = APIInboxConfig(**config)
-                logger.info(f"📋 CONFIG: Loaded API inbox '{inbox_type}': {config.get('name', 'Unknown')}")
-            
-            return api_inboxes
-            
-        except (json.JSONDecodeError, FileNotFoundError, ValueError) as e:
-            logger.error(f"❌ CONFIG: Failed to parse API inboxes config: {e}")
-            return {}
+    @staticmethod
+    def _parse_api_inboxes(inboxes_tree: Dict[str, Any]) -> Dict[str, APIInboxConfig]:
+        """Build APIInboxConfig dict from CW_BRIDGE__api_inboxes__<type>__* env vars."""
+        api_inboxes: Dict[str, APIInboxConfig] = {}
+        for inbox_type, fields in inboxes_tree.items():
+            if not isinstance(fields, dict):
+                continue
+            try:
+                prepared = dict(fields)
+                # Handle comma-separated list fields
+                if "message_types" in prepared and isinstance(prepared["message_types"], str):
+                    prepared["message_types"] = [t.strip() for t in prepared["message_types"].split(",")]
+                # Handle boolean fields (Pydantic strict mode won't coerce strings)
+                for bool_field in ("supports_outbound", "supports_email_replies"):
+                    if bool_field in prepared and isinstance(prepared[bool_field], str):
+                        prepared[bool_field] = prepared[bool_field].lower() == "true"
+                api_inboxes[inbox_type] = APIInboxConfig(**prepared)
+                logger.info(f"📋 CONFIG: Loaded API inbox '{inbox_type}': {prepared.get('name', 'Unknown')}")
+            except Exception as e:
+                logger.error(f"❌ CONFIG: Failed to parse API inbox config for '{inbox_type}': {e}")
+        logger.info(f"📋 CONFIG: {len(api_inboxes)} API inbox configurations loaded")
+        return api_inboxes
     
     def get_agent_for_inbox(self, inbox_id: str) -> Optional[AgentConfig]:
         """Get the AI agent configuration for a specific inbox."""

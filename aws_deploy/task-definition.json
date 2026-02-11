@@ -2,8 +2,8 @@
   "family": "vital-chatwoot-bridge",
   "networkMode": "awsvpc",
   "requiresCompatibilities": ["FARGATE"],
-  "cpu": "256",
-  "memory": "512",
+  "cpu": "512",
+  "memory": "1024",
   "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole",
   "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/vital-chatwoot-bridge-task-role",
   "containerDefinitions": [
@@ -17,23 +17,25 @@
         }
       ],
       "essential": true,
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 30
+      },
       "environment": [
-        {
-          "name": "PORT",
-          "value": "8000"
-        },
-        {
-          "name": "HOST",
-          "value": "0.0.0.0"
-        },
-        {
-          "name": "DEBUG",
-          "value": "false"
-        },
-        {
-          "name": "ENVIRONMENT",
-          "value": "production"
-        }
+        { "name": "PORT", "value": "8000" },
+        { "name": "HOST", "value": "0.0.0.0" },
+        { "name": "DEBUG", "value": "false" },
+        { "name": "ENVIRONMENT", "value": "production" },
+        { "name": "LOG_LEVEL", "value": "INFO" },
+        { "name": "LOG_FORMAT", "value": "json" },
+        { "name": "ENFORCE_WEBHOOK_SIGNATURES", "value": "true" },
+        { "name": "DEFAULT_RESPONSE_TIMEOUT", "value": "30" },
+        { "name": "WEBSOCKET_CONNECT_TIMEOUT", "value": "10" },
+        { "name": "WEBSOCKET_PING_INTERVAL", "value": "30" },
+        { "name": "WEBSOCKET_PING_TIMEOUT", "value": "10" }
       ],
       "secrets": [
         {
@@ -41,16 +43,48 @@
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/chatwoot-base-url-XXXXXX"
         },
         {
-          "name": "CHATWOOT_API_ACCESS_TOKEN",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/chatwoot-api-token-XXXXXX"
+          "name": "CHATWOOT_USER_ACCESS_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/chatwoot-user-access-token-XXXXXX"
         },
         {
           "name": "CHATWOOT_ACCOUNT_ID",
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/chatwoot-account-id-XXXXXX"
         },
         {
-          "name": "INBOX_AGENT_MAPPINGS",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/inbox-agent-mappings-XXXXXX"
+          "name": "CHATWOOT_BOT_WEBHOOK_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/chatwoot-bot-webhook-secret-XXXXXX"
+        },
+        {
+          "name": "KEYCLOAK_BASE_URL",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/keycloak-base-url-XXXXXX"
+        },
+        {
+          "name": "KEYCLOAK_REALM",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/keycloak-realm-XXXXXX"
+        },
+        {
+          "name": "KEYCLOAK_CLIENT_ID",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/keycloak-client-id-XXXXXX"
+        },
+        {
+          "name": "KEYCLOAK_CLIENT_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/keycloak-client-secret-XXXXXX"
+        },
+        {
+          "name": "LOOPMESSAGE_API_URL",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/loopmessage-api-url-XXXXXX"
+        },
+        {
+          "name": "LOOPMESSAGE_AUTHORIZATION_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/loopmessage-authorization-key-XXXXXX"
+        },
+        {
+          "name": "LOOPMESSAGE_SECRET_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/loopmessage-secret-key-XXXXXX"
+        },
+        {
+          "name": "LOOPMESSAGE_SENDER_NAME",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/loopmessage-sender-name-XXXXXX"
         }
       ],
       "logConfiguration": {

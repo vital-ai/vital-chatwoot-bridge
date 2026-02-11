@@ -13,13 +13,15 @@ from typing import Dict, Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-# Load environment variables from .env file
-from dotenv import load_dotenv
-load_dotenv()
+# Load .env file in development (ECS injects env vars directly)
+if os.getenv("ENVIRONMENT") != "production":
+    from dotenv import load_dotenv
+    load_dotenv()
 
 from vital_chatwoot_bridge.core.config import get_settings
 from vital_chatwoot_bridge.api.routes import health_router
 from vital_chatwoot_bridge.api.api_inbox_routes import api_inbox_router
+from vital_chatwoot_bridge.api.chatwoot_management_routes import router as chatwoot_management_router
 from vital_chatwoot_bridge.handlers.webhook_handler import WebhookHandler
 from vital_chatwoot_bridge.chatwoot.api_client import get_chatwoot_client, close_chatwoot_client
 from vital_chatwoot_bridge.utils.webhook_security import verify_webhook_signature, log_webhook_headers
@@ -78,7 +80,7 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=settings.allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -163,6 +165,7 @@ async def get_status():
 # Include API routes
 app.include_router(health_router)
 app.include_router(api_inbox_router)
+app.include_router(chatwoot_management_router)
 
 
 @app.on_event("startup")

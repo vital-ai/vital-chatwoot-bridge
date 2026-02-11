@@ -24,16 +24,17 @@
       "containerPort": 8000
     }
   ],
+  "healthCheckGracePeriodSeconds": 60,
   "serviceRegistries": [],
   "deploymentConfiguration": {
     "maximumPercent": 200,
-    "minimumHealthyPercent": 50,
+    "minimumHealthyPercent": 100,
     "deploymentCircuitBreaker": {
       "enable": true,
       "rollback": true
     }
   },
-  "enableExecuteCommand": false,
+  "enableExecuteCommand": true,
   "enableLogging": true,
   "tags": [
     {

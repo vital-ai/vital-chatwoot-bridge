@@ -35,9 +35,6 @@ RUN pip install --no-cache-dir --upgrade pip \
 # Copy application code
 COPY vital_chatwoot_bridge/ ./vital_chatwoot_bridge/
 
-# Copy configuration files
-COPY config/ ./config/
-
 # Create non-root user for security
 RUN groupadd -r appuser && useradd -r -g appuser appuser \
     && chown -R appuser:appuser /app

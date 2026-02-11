@@ -4,10 +4,26 @@ Centralized logging configuration for the Vital Chatwoot Bridge.
 Ensures consistent logging setup across all modules and scripts.
 """
 
+import json
 import logging
 import os
 import sys
 from typing import Optional
+
+
+class JSONFormatter(logging.Formatter):
+    """JSON log formatter for CloudWatch / structured logging."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        log_entry = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info and record.exc_info[0] is not None:
+            log_entry["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_entry, default=str)
 
 
 def setup_logging(
@@ -50,12 +66,14 @@ def setup_logging(
         root_logger.handlers.clear()
     
     # Configure logging
-    logging.basicConfig(
-        level=numeric_level,
-        format=format_string,
-        stream=sys.stdout,
-        force=force_reconfigure
-    )
+    log_format = os.getenv('LOG_FORMAT', 'text').lower()
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(numeric_level)
+    if log_format == 'json':
+        handler.setFormatter(JSONFormatter())
+    else:
+        handler.setFormatter(logging.Formatter(format_string))
+    root_logger.addHandler(handler)
     
     # Set the root logger level
     root_logger.setLevel(numeric_level)

@@ -14,14 +14,10 @@ services:
       - PORT=8000
       - DEBUG=false
       - HOST=0.0.0.0
-      # Production environment variables
       - ENVIRONMENT=production
-      # Chatwoot configuration
-      - CHATWOOT_BASE_URL=${CHATWOOT_BASE_URL}
-      - CHATWOOT_API_TOKEN=${CHATWOOT_API_TOKEN}
-      # Vital AI configuration
-      - VITAL_AI_BASE_URL=${VITAL_AI_BASE_URL}
-      - VITAL_AI_API_TOKEN=${VITAL_AI_API_TOKEN}
+      - LOG_FORMAT=json
+    env_file:
+      - .env
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
