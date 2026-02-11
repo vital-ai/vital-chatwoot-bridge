@@ -125,8 +125,13 @@ class APIInboxService:
             message_type = "sms" if "sms" in event_type else "email"
             
             # Extract contact information
+            # Convert external_id to string if it's an integer (Attentive sends it as int)
+            external_id = subscriber.get("external_id")
+            if external_id is not None:
+                external_id = str(external_id)
+            
             contact = ChatwootContact(
-                identifier=subscriber.get("external_id", subscriber.get("phone", subscriber.get("email", "unknown"))),
+                identifier=external_id or subscriber.get("phone") or subscriber.get("email") or "unknown",
                 name=subscriber.get("name"),
                 email=subscriber.get("email"),
                 phone_number=subscriber.get("phone")
@@ -155,7 +160,7 @@ class APIInboxService:
                     custom_attributes={
                         "attentive_event_type": event_type,
                         "attentive_message_id": message_data.get("id"),
-                        "attentive_timestamp": webhook_payload.timestamp,
+                        "attentive_timestamp": int(webhook_payload.timestamp / 1000) if webhook_payload.timestamp else None,  # Convert ms to seconds
                         "sender_type": sender_type,
                         "message_type": message_type
                     }
