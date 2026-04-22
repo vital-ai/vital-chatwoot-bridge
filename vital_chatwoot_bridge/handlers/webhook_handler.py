@@ -184,18 +184,16 @@ class WebhookHandler:
                     }
                 ).model_dump()
             else:
-                # Fallback response if agent doesn't respond in time
-                fallback_msg = "I apologize, but I'm experiencing technical difficulties. Please try again in a moment."
-                await self._post_response_to_chatwoot(
-                    event_data.account.get("id"),
-                    event_data.conversation.get("id"),
-                    fallback_msg,
-                    private=False
+                # Agent returned no responses — log but do NOT send a
+                # customer-facing fallback so the conversation stays clean.
+                logger.warning(
+                    f"⚠️ Agent returned no responses for conversation "
+                    f"{event_data.conversation.get('id')} (message {message_id})"
                 )
                 
                 return WebhookResponse(
-                    status="processed_fallback",
-                    message="Fallback response sent due to agent timeout"
+                    status="processed_no_response",
+                    message="Agent returned no responses"
                 ).model_dump()
         
         except ValidationError as e:

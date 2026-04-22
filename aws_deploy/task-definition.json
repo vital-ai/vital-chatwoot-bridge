@@ -17,13 +17,6 @@
         }
       ],
       "essential": true,
-      "healthCheck": {
-        "command": ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"],
-        "interval": 30,
-        "timeout": 5,
-        "retries": 3,
-        "startPeriod": 30
-      },
       "environment": [
         { "name": "CW_BRIDGE__app__port", "value": "8000" },
         { "name": "CW_BRIDGE__app__host", "value": "0.0.0.0" },
