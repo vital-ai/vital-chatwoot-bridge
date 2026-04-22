@@ -4,6 +4,8 @@ Handles contact creation, conversation management, and message posting via publi
 """
 
 import asyncio
+import io
+import json
 import logging
 from typing import Dict, Any, Optional, List
 from datetime import datetime
@@ -30,6 +32,22 @@ class ChatwootClientAPIError(Exception):
         self.response_data = response_data
 
 
+# ---------------------------------------------------------------------------
+# Module-level semaphore (shared across all ChatwootClientAPI instances in this task)
+# ---------------------------------------------------------------------------
+_chatwoot_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    """Lazy-init the global Chatwoot concurrency semaphore."""
+    global _chatwoot_semaphore
+    if _chatwoot_semaphore is None:
+        settings = get_settings()
+        _chatwoot_semaphore = asyncio.Semaphore(settings.rl_max_chatwoot_concurrency)
+        logger.info(f"🚦 Chatwoot semaphore initialized — max_concurrency={settings.rl_max_chatwoot_concurrency}")
+    return _chatwoot_semaphore
+
+
 class ChatwootClientAPI:
     """Client for Chatwoot Main API used by API inboxes."""
     
@@ -52,7 +70,63 @@ class ChatwootClientAPI:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit."""
         await self.client.aclose()
-    
+
+    # ------------------------------------------------------------------
+    # Rate-limited request helper
+    # ------------------------------------------------------------------
+
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        **kwargs,
+    ) -> httpx.Response:
+        """Execute an HTTP request through the global semaphore with retry.
+
+        Retries on 429 (rate-limited) and 503 (unavailable) with exponential
+        backoff.  Other 5xx errors get a single retry.
+        """
+        sem = _get_semaphore()
+        max_attempts = self.settings.rl_retry_max_attempts
+        base_delay = self.settings.rl_retry_base_delay
+
+        last_response: Optional[httpx.Response] = None
+        for attempt in range(1, max_attempts + 1):
+            async with sem:
+                last_response = await self.client.request(method, url, **kwargs)
+
+            status = last_response.status_code
+
+            # Success or client error (not retryable)
+            if status < 500 and status not in (429,):
+                return last_response
+
+            # Determine delay
+            if status in (429, 503):
+                retry_after = last_response.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        delay = float(retry_after)
+                    except ValueError:
+                        delay = base_delay * (2 ** (attempt - 1))
+                else:
+                    delay = base_delay * (2 ** (attempt - 1))
+            else:
+                # Other 5xx — single retry with base delay
+                delay = base_delay
+                if attempt >= 2:
+                    break  # Only one retry for generic 5xx
+
+            if attempt < max_attempts:
+                logger.warning(
+                    f"🚦 Chatwoot API {status} on {method} {url} — "
+                    f"retry {attempt}/{max_attempts} after {delay:.1f}s"
+                )
+                await asyncio.sleep(delay)
+
+        # All retries exhausted — return last response for caller to handle
+        return last_response
+
     async def create_or_get_contact(
         self, 
         inbox_id: int, 
@@ -71,13 +145,29 @@ class ChatwootClientAPI:
         Raises:
             ChatwootClientAPIError: If the API request fails
         """
+        # Use contact cache for deduplication
+        from vital_chatwoot_bridge.chatwoot.contact_cache import get_contact_cache
+        cache = get_contact_cache()
+        cache_key = contact.phone_number or contact.email or contact.identifier
+
+        async def _do_create_or_get() -> ChatwootContactResponse:
+            return await self._create_or_get_contact_uncached(inbox_id, contact)
+
+        return await cache.get_or_create(cache_key, _do_create_or_get)
+
+    async def _create_or_get_contact_uncached(
+        self,
+        inbox_id: int,
+        contact: ChatwootContact,
+    ) -> ChatwootContactResponse:
+        """Actual contact search/create logic (called through the cache)."""
         try:
             # First, search for existing contact
             search_url = f"{self.base_url}/accounts/{self.settings.chatwoot_account_id}/contacts/search"
             search_params = {"q": contact.phone_number or contact.email or contact.identifier}
             
             logger.info(f"Searching for existing contact: {search_params['q']}")
-            search_response = await self.client.get(search_url, params=search_params)
+            search_response = await self._request("GET", search_url, params=search_params)
             
             if search_response.status_code == 200:
                 search_data = search_response.json()
@@ -110,7 +200,36 @@ class ChatwootClientAPI:
             payload = {k: v for k, v in payload.items() if v is not None}
             
             logger.info(f"Creating new contact for inbox {inbox_id}: {contact.identifier}")
-            create_response = await self.client.post(create_url, json=payload)
+            create_response = await self._request("POST", create_url, json=payload)
+
+            # ----------------------------------------------------------
+            # Handle 422 (duplicate contact) gracefully
+            # ----------------------------------------------------------
+            if create_response.status_code == 422:
+                logger.warning(
+                    f"Contact already exists (422), re-searching: "
+                    f"{contact.phone_number or contact.email or contact.identifier}"
+                )
+                # Re-search — the contact exists but we lost the race
+                retry_resp = await self._request("GET", search_url, params=search_params)
+                if retry_resp.status_code == 200:
+                    for existing_contact in retry_resp.json().get('payload', []):
+                        if (existing_contact.get('phone_number') == contact.phone_number or
+                            existing_contact.get('email') == contact.email or
+                            existing_contact.get('identifier') == contact.identifier):
+                            logger.info(f"Found contact on re-search after 422: {existing_contact['id']}")
+                            return ChatwootContactResponse(
+                                id=existing_contact['id'],
+                                source_id=str(existing_contact['id']),
+                                name=existing_contact.get('name'),
+                                email=existing_contact.get('email')
+                            )
+                # If re-search also fails, raise
+                raise ChatwootClientAPIError(
+                    "Contact 422 (duplicate) but re-search found nothing",
+                    status_code=422,
+                    response_data=create_response.json() if create_response.content else None
+                )
             
             if create_response.status_code not in [200, 201]:
                 error_msg = f"Failed to create contact: {create_response.status_code}"
@@ -177,7 +296,7 @@ class ChatwootClientAPI:
         
         try:
             logger.info(f"Creating conversation for contact {contact_id} in inbox {inbox_id}")
-            response = await self.client.post(url, json=payload)
+            response = await self._request("POST", url, json=payload)
             
             if response.status_code not in [200, 201]:
                 error_msg = f"Failed to create conversation: {response.status_code}"
@@ -208,6 +327,21 @@ class ChatwootClientAPI:
             logger.error(error_msg)
             raise ChatwootClientAPIError(error_msg)
     
+    @staticmethod
+    def _build_multipart_files(attachments):
+        """Convert ChatwootAttachment objects into httpx-compatible file tuples."""
+        files = []
+        for att in attachments:
+            if att.file_bytes:
+                files.append(
+                    ("attachments[]", (att.filename, io.BytesIO(att.file_bytes), att.content_type))
+                )
+            elif att.signed_id:
+                files.append(
+                    ("attachments[]", (None, att.signed_id))
+                )
+        return files
+
     async def send_message(
         self,
         conversation_id: int,
@@ -215,6 +349,9 @@ class ChatwootClientAPI:
     ) -> ChatwootMessageResponse:
         """
         Send a message to an existing conversation using Main API.
+
+        Automatically switches to multipart form-data when the message
+        carries ``file_attachments`` with ``file_bytes``.
         
         Args:
             conversation_id: The conversation ID
@@ -227,24 +364,60 @@ class ChatwootClientAPI:
             ChatwootClientAPIError: If the API request fails
         """
         url = f"{self.base_url}/accounts/{self.settings.chatwoot_account_id}/conversations/{conversation_id}/messages"
-        
-        payload = {
-            "content": message.content,
-            "message_type": message.message_type,
-            "private": False
-        }
-        
-        # Add echo_id if provided
-        if message.echo_id:
-            payload["echo_id"] = message.echo_id
-            
-        # Add attachments if provided
-        if message.attachments:
-            payload["attachments"] = message.attachments
-        
+
+        has_file_attachments = (
+            message.file_attachments
+            and any(a.file_bytes for a in message.file_attachments)
+        )
+
         try:
             logger.info(f"Sending message to conversation {conversation_id}")
-            response = await self.client.post(url, json=payload)
+
+            if has_file_attachments:
+                # -- Multipart form-data path --------------------------------
+                data: Dict[str, Any] = {
+                    "content": message.content,
+                    "message_type": message.message_type,
+                    "private": "false",
+                    "content_type": message.content_type,
+                }
+                if message.echo_id:
+                    data["echo_id"] = message.echo_id
+                if message.content_attributes:
+                    data["content_attributes"] = json.dumps(message.content_attributes)
+
+                files = self._build_multipart_files(message.file_attachments)
+                logger.info(f"📎 Uploading {len(files)} attachment(s) via multipart")
+
+                headers = {k: v for k, v in self.client.headers.items()
+                           if k.lower() != "content-type"}
+
+                response = await self._request(
+                    "POST", url, data=data, files=files, headers=headers
+                )
+            else:
+                # -- JSON path -----------------------------------------------
+                payload: Dict[str, Any] = {
+                    "content": message.content,
+                    "message_type": message.message_type,
+                    "private": False,
+                    "content_type": message.content_type,
+                }
+                if message.echo_id:
+                    payload["echo_id"] = message.echo_id
+                if message.content_attributes:
+                    payload["content_attributes"] = message.content_attributes
+
+                # Signed-ID-only attachments
+                if message.file_attachments:
+                    payload["attachments"] = [
+                        {"signed_id": a.signed_id}
+                        for a in message.file_attachments if a.signed_id
+                    ]
+                elif message.attachments:
+                    payload["attachments"] = message.attachments
+
+                response = await self._request("POST", url, json=payload)
             
             if response.status_code not in [200, 201]:
                 error_msg = f"Failed to send message: {response.status_code}"
@@ -286,7 +459,7 @@ class ChatwootClientAPI:
         try:
             url = f"{self.base_url}/accounts/{self.settings.chatwoot_account_id}/contacts/{contact_id}/conversations"
             
-            response = await self.client.get(url)
+            response = await self._request("GET", url)
             
             if response.status_code == 200:
                 data = response.json()

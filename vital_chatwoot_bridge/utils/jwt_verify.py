@@ -153,14 +153,15 @@ async def verify_token(token: str) -> AuthenticatedUser:
             }
         )
 
-        # Verify authorized party (azp) matches our client_id.
+        # Verify authorized party (azp) against the allow-list.
         # Keycloak password-grant tokens set aud="account", not the client_id,
         # so we check azp instead of aud.
         token_azp = claims.get("azp", "")
-        if token_azp != settings.keycloak_client_id:
+        allowed_azps = settings.keycloak_allowed_azps or [settings.keycloak_client_id]
+        if token_azp not in allowed_azps:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"Token authorized party mismatch: expected {settings.keycloak_client_id}, got {token_azp}",
+                detail=f"Token authorized party mismatch: expected one of {allowed_azps}, got {token_azp}",
             )
 
         # Map claims to AuthenticatedUser

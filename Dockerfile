@@ -28,9 +28,13 @@ COPY requirements.txt ./
 COPY vital_env.env vital_env.env
 COPY vitalhome vitalhome
 
+ENV VITALHOME=/app/vitalhome
+
 # Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
+
+RUN python -c "from vital_ai_vitalsigns.vitalsigns import VitalSigns; VitalSigns()"
 
 # Copy application code
 COPY vital_chatwoot_bridge/ ./vital_chatwoot_bridge/

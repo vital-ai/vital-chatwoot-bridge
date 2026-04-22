@@ -19,6 +19,7 @@ class MessageSender(BaseModel):
     id: str = Field(..., description="Sender ID")
     name: str = Field(..., description="Sender name")
     email: Optional[str] = Field(None, description="Sender email")
+    phone: Optional[str] = Field(None, description="Sender phone number")
     type: str = Field(default="contact", description="Sender type (contact/user)")
 
 
@@ -33,8 +34,14 @@ class BridgeToAgentMessage(BaseModel):
     """Message format sent from bridge to AI agent."""
     message_id: str = Field(..., description="Unique message ID for correlation")
     inbox_id: str = Field(..., description="Chatwoot inbox identifier")
+    inbox_name: str = Field(default="", description="Human-readable inbox name from config")
+    aimp_intent_type: str = Field(
+        default="http://vital.ai/ontology/vital-aimp#AIMPIntentType_CHAT",
+        description="AIMP intent type URI for this inbox",
+    )
     conversation_id: int = Field(..., description="Chatwoot conversation ID")
     content: str = Field(..., description="Message content from customer")
+    subject: Optional[str] = Field(None, description="Email subject line (email channels only)")
     sender: MessageSender = Field(..., description="Message sender information")
     context: MessageContext = Field(..., description="Message context")
     response_mode: ResponseMode = Field(default=ResponseMode.SYNC, description="Expected response type")

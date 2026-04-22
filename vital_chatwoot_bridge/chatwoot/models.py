@@ -186,6 +186,30 @@ class ChatwootWebWidgetTriggeredEvent(ChatwootWebhookEvent):
     event_info: Dict[str, Any] = Field(..., description="Event information")
 
 
+class ChatwootAttachment(BaseModel):
+    """Attachment model for file uploads to Chatwoot.
+
+    Use either ``file_bytes`` (multipart upload) or ``signed_id`` (pre-uploaded
+    via direct upload) — not both.
+    """
+    filename: str = Field(..., description="Original filename including extension")
+    content_type: str = Field(default="application/octet-stream", description="MIME type")
+    file_bytes: Optional[bytes] = Field(None, description="Raw file content for multipart upload")
+    signed_id: Optional[str] = Field(None, description="ActiveStorage signed ID from direct upload")
+
+
+class DirectUploadResponse(BaseModel):
+    """Response from Chatwoot direct upload endpoint."""
+    id: int = Field(..., description="Blob ID")
+    key: str = Field(..., description="Storage key")
+    filename: str = Field(..., description="Original filename")
+    content_type: str = Field(..., description="MIME type")
+    byte_size: int = Field(..., description="File size in bytes")
+    checksum: str = Field(..., description="MD5 checksum")
+    signed_id: str = Field(..., description="Signed ID to reference in messages")
+    direct_upload: Optional[Dict[str, Any]] = Field(None, description="Pre-signed upload URL info")
+
+
 class ChatwootAPIMessageRequest(BaseModel):
     """Request model for creating messages via Chatwoot API."""
     content: str = Field(..., description="Message content")

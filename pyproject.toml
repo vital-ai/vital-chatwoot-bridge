@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vital-chatwoot-bridge"
-version = "0.1.0"
+version = "0.1.2"
 description = "Chatwoot management bridge with REST API and async Python client"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -38,7 +38,9 @@ server = [
     "PyJWT[crypto]>=2.8.0",
     "aiofiles>=23.2.1",
     "pydantic-settings>=2.1.0",
-    "vital-ai-vitalsigns>=0.1.32",
+    "Jinja2>=3.1.0",
+    "boto3>=1.28.0",
+    "vital-ai-vitalsigns>=0.1.51",
     "vital-ai-haley-kg>=0.1.24",
     "vital-agent-container-client>=0.0.8",
 ]

@@ -107,8 +107,8 @@ class WebhookHandler:
             
             logger.info(f"🎯 WEBHOOK: Extracted inbox_id: '{inbox_id}' from webhook payload")
             
-            agent_config = self.settings.get_agent_for_inbox(inbox_id)
-            if not agent_config:
+            inbox_mapping = self.settings.get_inbox_mapping(inbox_id)
+            if not inbox_mapping:
                 logger.warning(f"No agent configured for inbox {inbox_id}")
                 # Debug: show available inbox mappings
                 available_inboxes = [mapping.inbox_id for mapping in self.settings.inbox_agent_mappings]
@@ -118,19 +118,28 @@ class WebhookHandler:
                     message=f"No agent configured for inbox {inbox_id}"
                 ).model_dump()
             
-            logger.info(f"🎯 WEBHOOK: Selected agent '{agent_config.agent_id}' for inbox '{inbox_id}'")
+            agent_config = inbox_mapping.agent_config
+            logger.info(f"🎯 WEBHOOK: Selected agent '{agent_config.agent_id}' for inbox '{inbox_id}' ({inbox_mapping.inbox_name})")
             
+            # Extract email subject from content_attributes if present
+            email_attrs = event_data.content_attributes.get("email", {})
+            subject = email_attrs.get("subject") if isinstance(email_attrs, dict) else None
+
             # Create bridge message
             message_id = str(uuid.uuid4())
             bridge_message = BridgeToAgentMessage(
                 message_id=message_id,
                 inbox_id=inbox_id,
+                inbox_name=inbox_mapping.inbox_name,
+                aimp_intent_type=inbox_mapping.aimp_intent_type,
                 conversation_id=event_data.conversation.get("id"),
                 content=event_data.content,
+                subject=subject,
                 sender=MessageSender(
                     id=str(event_data.sender.get("id", "unknown")),
                     name=event_data.sender.get("name", "Unknown"),
                     email=event_data.sender.get("email"),
+                    phone=event_data.sender.get("phone_number"),
                     type=event_data.sender.get("type", "contact")
                 ),
                 context=MessageContext(
@@ -147,27 +156,31 @@ class WebhookHandler:
             responses = await self._send_message_to_agent(agent_config, bridge_message)
             
             if responses:
-                # Post all responses to Chatwoot
                 account_id = event_data.account.get("id")
                 conversation_id = event_data.conversation.get("id")
                 
+                delivered_count = 0
                 for response in responses:
-                    if response.success:
+                    if response.success and response.deliver_to_chatwoot:
                         await self._post_response_to_chatwoot(
                             account_id,
                             conversation_id,
                             response.content,
                             private=False
                         )
+                        delivered_count += 1
+                    elif response.success:
+                        logger.info(f"📨 Response received but not posted to Chatwoot (deliver_to_chatwoot=False)")
                 
-                # Return first response content in webhook response
+                # Always return response content in webhook response
                 first_response = responses[0]
                 return WebhookResponse(
                     status="processed_sync",
-                    message=f"Message processed and {len(responses)} response(s) sent",
+                    message=f"Message processed: {len(responses)} response(s), {delivered_count} delivered to Chatwoot",
                     data={
                         "response_content": first_response.content,
-                        "total_responses": len(responses)
+                        "total_responses": len(responses),
+                        "delivered_to_chatwoot": delivered_count,
                     }
                 ).model_dump()
             else:

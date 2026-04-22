@@ -60,7 +60,7 @@ CW_BRIDGE__bots__default__access_token=chatwoot-bot-access-token
 CW_BRIDGE__bots__default__name=Default Bot
 
 # Inbox → Agent mapping (bot field links to CW_BRIDGE__bots__)
-CW_BRIDGE__inbox_agents__1__agent_id=cardiff-sales-agent
+CW_BRIDGE__inbox_agents__1__agent_id=sales-agent
 CW_BRIDGE__inbox_agents__1__websocket_url=http://agents-internal:6006
 CW_BRIDGE__inbox_agents__1__timeout_seconds=30
 CW_BRIDGE__inbox_agents__1__bot=default

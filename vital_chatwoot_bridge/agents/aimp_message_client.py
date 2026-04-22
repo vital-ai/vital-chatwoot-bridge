@@ -165,20 +165,65 @@ class AimpMessageClient:
         # Create AIMP Intent
         aimp_msg = AIMPIntent()
         aimp_msg.URI = URIGenerator.generate_uri()
-        aimp_msg.aIMPIntentType = "http://vital.ai/ontology/vital-aimp#AIMPIntentType_CHAT"
+        aimp_msg.aIMPIntentType = message.aimp_intent_type
         aimp_msg.accountURI = f"urn:account_{message.inbox_id}"
         aimp_msg.username = message.sender.name or "chatwoot_user"
         aimp_msg.userID = message.sender.id
         aimp_msg.sessionID = f"session_{message.message_id}"
         aimp_msg.authSessionID = f"session_{message.message_id}"
+
+        # Sender identity & channel context on AIMPIntent
+        if message.sender.email:
+            aimp_msg.senderIdentity = message.sender.email
+        aimp_msg.channelURI = message.context.channel
+        aimp_msg.threadURI = f"urn:conversation_{message.conversation_id}"
+        if message.context.created_at:
+            aimp_msg.timestamp = int(message.context.created_at.timestamp() * 1000)
         
         # Create user message content
         user_content = UserMessageContent()
         user_content.URI = URIGenerator.generate_uri()
         user_content.text = message.content
+
+        # Normalize Chatwoot channel string to short form expected by agent
+        channel_map = {
+            "Channel::Email": "email",
+            "Channel::TwilioSms": "sms",
+            "Channel::Sms": "sms",
+            "Channel::WebWidget": "web",
+            "Channel::Api": "api",
+            "Channel::Whatsapp": "whatsapp",
+            "Channel::Telegram": "telegram",
+            "Channel::Line": "line",
+            "Channel::Facebook": "facebook",
+            "Channel::Twitter": "twitter",
+        }
+        raw_channel = message.context.channel or ""
+        channel = channel_map.get(raw_channel, raw_channel.lower())
+
+        # Pack full context into messageContentJSON
+        # Fields aligned with what the agent handler extracts
+        content_json = {
+            "message_body": message.content,
+            "subject": message.subject,
+            "sender_id": message.sender.id,
+            "sender_name": message.sender.name,
+            "sender_email": message.sender.email,
+            "sender_phone": message.sender.phone,
+            "sender_type": message.sender.type,
+            "channel": channel,
+            "assigned_personality": message.inbox_name.lower().replace("agent", "").strip() or None,
+            "inbox_id": message.inbox_id,
+            "inbox_name": message.inbox_name,
+            "conversation_id": message.conversation_id,
+            "created_at": message.context.created_at.isoformat() if message.context.created_at else None,
+            "additional_attributes": message.context.additional_attributes or {},
+        }
+        user_content.messageContentJSON = json.dumps(content_json)
         
         logger.info(f"🔍 DEBUG: Sending message content to agent: '{message.content}'")
         logger.info(f"🔍 DEBUG: Session ID: {aimp_msg.sessionID}")
+        logger.info(f"🔍 DEBUG: messageContentJSON: {user_content.messageContentJSON}")
         
         return [aimp_msg, user_content]
     
@@ -186,17 +231,22 @@ class AimpMessageClient:
         """Parse AIMP response into AgentChatResponse format."""
         try:
             if isinstance(raw_response, list):
-                # Extract agent message content from the response
+                # Extract agent message content and intent flags from the response
                 agent_text = None
+                deliver_to_chatwoot = False
                 for component in raw_response:
                     if isinstance(component, dict):
                         component_type = component.get('type', '')
+                        if 'AIMPIntent' in component_type:
+                            deliver_to_chatwoot = bool(component.get(
+                                'http://vital.ai/ontology/vital-aimp#isDirectMessageResponse', False
+                            ))
                         if 'AgentMessageContent' in component_type:
                             agent_text = component.get('http://vital.ai/ontology/vital-aimp#hasText', '')
-                            break
                 
                 if agent_text:
                     from vital_chatwoot_bridge.core.models import ResponseMode, AgentResponseMetadata
+                    logger.info(f"📨 AIMP: deliver_to_chatwoot={deliver_to_chatwoot} for message {message.message_id}")
                     return AgentChatResponse(
                         message_id=message.message_id,
                         inbox_id=message.inbox_id,
@@ -208,6 +258,7 @@ class AimpMessageClient:
                             source="aimp_agent",
                             processing_time_ms=0
                         ),
+                        deliver_to_chatwoot=deliver_to_chatwoot,
                         success=True
                     )
             

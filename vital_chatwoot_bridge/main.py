@@ -57,12 +57,69 @@ async def lifespan(app: FastAPI):
         else:
             logger.warning("⚠️  Chatwoot API connection failed - continuing anyway")
         
+        # Initialize webhook worker pool for Attentive rate limiting
+        from vital_chatwoot_bridge.services.webhook_queue import (
+            create_queue, WebhookWorkerPool, set_worker_pool,
+        )
+        from vital_chatwoot_bridge.services.api_inbox_service import APIInboxService
+        from vital_chatwoot_bridge.chatwoot.client_models import AttentiveWebhookRequest
+
+        async def _attentive_queue_handler(raw_payload: dict) -> None:
+            """Process a single Attentive webhook payload from the queue."""
+            try:
+                validated = AttentiveWebhookRequest(**raw_payload)
+                svc = APIInboxService()
+                await svc.process_attentive_webhook(validated)
+            except Exception as exc:
+                logger.error(f"❌ Queue handler error: {exc}", exc_info=True)
+
+        try:
+            queue = create_queue(
+                backend=settings.rl_queue_backend,
+                maxsize=settings.rl_attentive_queue_size,
+                redis_url=settings.rl_redis_url,
+                queue_key=settings.rl_redis_queue_key,
+            )
+            pool = WebhookWorkerPool(
+                queue=queue,
+                handler=_attentive_queue_handler,
+                num_workers=settings.rl_attentive_workers,
+            )
+            pool.start()
+            set_worker_pool(pool)
+            logger.info(
+                f"🚀 Webhook worker pool started — "
+                f"backend={settings.rl_queue_backend}, "
+                f"workers={settings.rl_attentive_workers}"
+            )
+        except Exception as e:
+            logger.warning(f"⚠️  Webhook worker pool init failed: {e}")
+
+        # Initialize email template renderer (if configured)
+        if settings.email_templates:
+            try:
+                from vital_chatwoot_bridge.email.renderer import init_renderer
+                init_renderer(
+                    settings.email_templates,
+                    aws_access_key_id=settings.aws_access_key_id,
+                    aws_secret_access_key=settings.aws_secret_access_key,
+                )
+                logger.info("📧 Email template renderer initialized")
+            except Exception as e:
+                logger.warning(f"⚠️  Email template renderer init failed: {e}")
+        
         logger.info("🚀 Vital Chatwoot Bridge started successfully")
         
         yield
         
     finally:
         logger.info("Shutting down Vital Chatwoot Bridge...")
+        
+        # Stop webhook worker pool
+        from vital_chatwoot_bridge.services.webhook_queue import get_worker_pool as _gwp
+        _pool = _gwp()
+        if _pool is not None:
+            await _pool.stop()
         
         # Cleanup
         await close_chatwoot_client()
@@ -168,6 +225,21 @@ async def get_status():
             status["chatwoot_api"] = "healthy" if api_healthy else "unhealthy"
         except Exception:
             status["chatwoot_api"] = "error"
+
+        # Webhook worker pool stats
+        from vital_chatwoot_bridge.services.webhook_queue import get_worker_pool as _gwp
+        _pool = _gwp()
+        if _pool is not None:
+            status["webhook_queue"] = await _pool.stats()
+        else:
+            status["webhook_queue"] = {"running": False}
+
+        # Contact cache stats
+        try:
+            from vital_chatwoot_bridge.chatwoot.contact_cache import get_contact_cache
+            status["contact_cache"] = get_contact_cache().stats()
+        except Exception:
+            pass
         
         return status
         

@@ -3,8 +3,12 @@ Chatwoot API client for posting messages and managing conversations.
 """
 
 import asyncio
+import base64
+import hashlib
+import io
+import json
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Sequence
 from datetime import datetime
 
 import httpx
@@ -13,7 +17,8 @@ from pydantic import ValidationError
 from vital_chatwoot_bridge.core.config import get_settings
 from vital_chatwoot_bridge.chatwoot.models import (
     ChatwootAPIMessageRequest, ChatwootAPIMessageResponse,
-    ChatwootConversation, ChatwootMessage
+    ChatwootAttachment, ChatwootConversation, ChatwootMessage,
+    DirectUploadResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,7 +45,6 @@ class ChatwootAPIClient:
             timeout=httpx.Timeout(30.0),
             headers={
                 "api_access_token": self.settings.chatwoot_user_access_token,
-                "Content-Type": "application/json"
             },
             event_hooks={"response": [self._on_response]},
         )
@@ -81,6 +85,33 @@ class ChatwootAPIClient:
         """Async context manager exit."""
         await self.client.aclose()
     
+    # ------------------------------------------------------------------
+    # Attachment helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_multipart_files(
+        attachments: Sequence[ChatwootAttachment],
+    ) -> List[tuple]:
+        """Convert ChatwootAttachment objects into httpx-compatible file tuples.
+
+        Each tuple follows the ``(field_name, (filename, file_obj, mime))`` format
+        expected by ``httpx.AsyncClient.post(files=...)``.
+        """
+        files: List[tuple] = []
+        for att in attachments:
+            if att.file_bytes:
+                files.append(
+                    ("attachments[]", (att.filename, io.BytesIO(att.file_bytes), att.content_type))
+                )
+            elif att.signed_id:
+                # Pre-uploaded via direct upload; pass the signed ID as a
+                # plain string field so Chatwoot attaches the existing blob.
+                files.append(
+                    ("attachments[]", (None, att.signed_id))
+                )
+        return files
+
     async def send_message(
         self,
         account_id: int,
@@ -89,7 +120,8 @@ class ChatwootAPIClient:
         message_type: str = "outgoing",
         private: bool = False,
         content_type: str = "text",
-        content_attributes: Optional[Dict[str, Any]] = None
+        content_attributes: Optional[Dict[str, Any]] = None,
+        attachments: Optional[Sequence[ChatwootAttachment]] = None,
     ) -> ChatwootAPIMessageResponse:
         """
         Send a message to a Chatwoot conversation.
@@ -102,6 +134,7 @@ class ChatwootAPIClient:
             private: Whether the message is private (internal note)
             content_type: Content type ("text", "input_email", etc.)
             content_attributes: Additional content attributes
+            attachments: Optional file attachments (triggers multipart upload)
             
         Returns:
             API response with message details
@@ -110,28 +143,56 @@ class ChatwootAPIClient:
             ChatwootAPIError: If the API request fails
         """
         try:
-            # Prepare request
-            request_data = ChatwootAPIMessageRequest(
-                content=content,
-                message_type=message_type,
-                private=private,
-                content_type=content_type,
-                content_attributes=content_attributes or {}
-            )
-            
-            # API endpoint
             url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages"
             
             logger.info(f"📤 REST: Making POST request to Chatwoot API")
             logger.info(f"📤 REST: URL: {url}")
             logger.info(f"📤 REST: Message content: {content[:100]}...")
             logger.info(f"📤 REST: Message type: {message_type}, Private: {private}")
-            
-            # Make request
-            response = await self.client.post(
-                url,
-                json=request_data.model_dump(exclude_none=True)
-            )
+
+            has_file_attachments = attachments and any(a.file_bytes for a in attachments)
+
+            if has_file_attachments:
+                # -- Multipart form-data path (file uploads) ----------------
+                data: Dict[str, Any] = {
+                    "content": content,
+                    "message_type": message_type,
+                    "private": str(private).lower(),
+                    "content_type": content_type,
+                }
+                if content_attributes:
+                    data["content_attributes"] = json.dumps(content_attributes)
+
+                files = self._build_multipart_files(attachments)
+                logger.info(f"📎 Uploading {len(files)} attachment(s) via multipart")
+
+                # Must remove the default JSON content-type header so httpx
+                # sets the correct multipart boundary automatically.
+                headers = {k: v for k, v in self.client.headers.items()
+                           if k.lower() != "content-type"}
+
+                response = await self.client.post(
+                    url, data=data, files=files, headers=headers
+                )
+            else:
+                # -- JSON path (no file uploads) ----------------------------
+                request_data = ChatwootAPIMessageRequest(
+                    content=content,
+                    message_type=message_type,
+                    private=private,
+                    content_type=content_type,
+                    content_attributes=content_attributes or {}
+                )
+                payload = request_data.model_dump(exclude_none=True)
+
+                # Signed-ID-only attachments can ride on the JSON payload.
+                if attachments:
+                    payload["attachments"] = [
+                        {"signed_id": a.signed_id}
+                        for a in attachments if a.signed_id
+                    ]
+
+                response = await self.client.post(url, json=payload)
             
             logger.info(f"✅ REST: Received response from Chatwoot API: HTTP {response.status_code}")
             
@@ -733,12 +794,16 @@ class ChatwootAPIClient:
     async def get_conversation_messages_raw(
         self,
         account_id: int,
-        conversation_id: int
+        conversation_id: int,
+        before: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Get messages for a conversation. Returns raw API response dict."""
         url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages"
+        params = {}
+        if before is not None:
+            params["before"] = before
         try:
-            response = await self.client.get(url)
+            response = await self.client.get(url, params=params or None)
             if response.status_code == 200:
                 return response.json()
             body = response.text[:500]
@@ -805,12 +870,36 @@ class ChatwootAPIClient:
         self,
         account_id: int,
         conversation_id: int,
-        data: Dict[str, Any]
+        data: Dict[str, Any],
+        attachments: Optional[Sequence[ChatwootAttachment]] = None,
     ) -> Dict[str, Any]:
-        """Send a message with arbitrary payload. Returns raw API response dict."""
+        """Send a message with arbitrary payload. Returns raw API response dict.
+
+        If *attachments* with ``file_bytes`` are provided the request is sent as
+        multipart form-data so files are uploaded inline.  Otherwise the payload
+        is sent as JSON.
+        """
         url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages"
         try:
-            response = await self.client.post(url, json=data)
+            has_file_attachments = attachments and any(a.file_bytes for a in attachments)
+
+            if has_file_attachments:
+                form_data = {k: (json.dumps(v) if isinstance(v, (dict, list)) else str(v))
+                             for k, v in data.items()}
+                files = self._build_multipart_files(attachments)
+                headers = {k: v for k, v in self.client.headers.items()
+                           if k.lower() != "content-type"}
+                response = await self.client.post(
+                    url, data=form_data, files=files, headers=headers
+                )
+            else:
+                if attachments:
+                    data["attachments"] = [
+                        {"signed_id": a.signed_id}
+                        for a in attachments if a.signed_id
+                    ]
+                response = await self.client.post(url, json=data)
+
             if response.status_code == 200:
                 return response.json()
             raise ChatwootAPIError(
@@ -822,6 +911,99 @@ class ChatwootAPIClient:
             raise
         except Exception as e:
             raise ChatwootAPIError(f"Error sending message: {e}")
+
+    # ------------------------------------------------------------------
+    # Direct upload (two-step blob approach)
+    # ------------------------------------------------------------------
+
+    async def create_direct_upload(
+        self,
+        account_id: int,
+        conversation_id: int,
+        filename: str,
+        content_type: str,
+        byte_size: int,
+        checksum: str,
+    ) -> DirectUploadResponse:
+        """Step 1 of two-step upload: create a direct-upload blob.
+
+        Returns a :class:`DirectUploadResponse` that contains the ``signed_id``
+        to reference in a subsequent message, and a ``direct_upload`` dict with
+        the pre-signed URL and headers for the actual file PUT.
+        """
+        url = (
+            f"{self.base_url}/api/v1/accounts/{account_id}"
+            f"/conversations/{conversation_id}/direct_uploads"
+        )
+        payload = {
+            "direct_upload": {
+                "filename": filename,
+                "content_type": content_type,
+                "byte_size": byte_size,
+                "checksum": checksum,
+            }
+        }
+        try:
+            response = await self.client.post(url, json=payload)
+            if response.status_code in (200, 201):
+                return DirectUploadResponse(**response.json())
+            raise ChatwootAPIError(
+                f"Direct upload creation failed: HTTP {response.status_code}",
+                status_code=response.status_code,
+                response_data=self._safe_json(response),
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error creating direct upload: {e}")
+
+    async def direct_upload(
+        self,
+        account_id: int,
+        conversation_id: int,
+        filename: str,
+        content_type: str,
+        file_bytes: bytes,
+    ) -> str:
+        """Upload a file via the two-step direct-upload flow.
+
+        Returns the ``signed_id`` that can be passed inside
+        ``ChatwootAttachment(signed_id=...)`` when sending a message.
+        """
+        checksum = base64.b64encode(hashlib.md5(file_bytes).digest()).decode()
+        blob = await self.create_direct_upload(
+            account_id, conversation_id,
+            filename=filename,
+            content_type=content_type,
+            byte_size=len(file_bytes),
+            checksum=checksum,
+        )
+
+        # PUT the raw bytes to the pre-signed URL
+        upload_info = blob.direct_upload or {}
+        upload_url = upload_info.get("url")
+        upload_headers = upload_info.get("headers", {})
+        if not upload_url:
+            raise ChatwootAPIError(
+                "Direct upload response missing pre-signed URL"
+            )
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as upload_client:
+            put_resp = await upload_client.put(
+                upload_url,
+                content=file_bytes,
+                headers=upload_headers,
+            )
+            if put_resp.status_code not in (200, 201, 204):
+                raise ChatwootAPIError(
+                    f"File PUT to storage failed: HTTP {put_resp.status_code}",
+                    status_code=put_resp.status_code,
+                )
+
+        logger.info(
+            f"📎 Direct upload complete: {filename} -> signed_id={blob.signed_id}"
+        )
+        return blob.signed_id
 
     async def update_contact_raw(
         self,

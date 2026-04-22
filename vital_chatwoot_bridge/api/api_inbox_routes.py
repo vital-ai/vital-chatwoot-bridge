@@ -13,6 +13,7 @@ from vital_chatwoot_bridge.chatwoot.client_models import (
     LoopMessageInboundRequest, LoopMessageOutboundRequest,
     AttentiveWebhookRequest, AttentiveEmailReplyRequest
 )
+from vital_chatwoot_bridge.email.models import MailgunSendEmailRequest, GmailSendEmailRequest
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +157,7 @@ async def post_loopmessage_outbound(
         )
 
 
-@api_inbox_router.post("/attentive/webhook")
+@api_inbox_router.post("/attentive/webhook", status_code=202)
 async def handle_attentive_webhook(
     request: Request,
     service: APIInboxService = Depends(get_api_inbox_service)
@@ -167,48 +168,90 @@ async def handle_attentive_webhook(
     This endpoint receives webhook events from Attentive for message
     aggregation in Chatwoot. Supports sms.sent, email.sent, and 
     sms.inbound_message event types.
+
+    Processing is asynchronous — the webhook is enqueued and a 202 Accepted
+    response is returned immediately.  If the queue is full, 429 is returned
+    so Attentive can retry later.
     
     Args:
         request: Raw HTTP request
         service: API inbox service dependency
         
     Returns:
-        Processing result with Chatwoot conversation details
+        202 Accepted with queue position info
         
     Raises:
-        HTTPException: If processing fails
+        HTTPException: If enqueue fails or event is filtered
     """
+    from vital_chatwoot_bridge.core.config import get_settings
+    from vital_chatwoot_bridge.services.webhook_queue import get_worker_pool
+
+    settings = get_settings()
+
     try:
-        # Get raw JSON payload for debugging
         raw_payload = await request.json()
-        logger.info(f"📨 Raw Attentive webhook payload: {raw_payload}")
-        
-        # Try to validate the payload
+
+        # ---- Event-type filtering ----------------------------------------
+        event_type = raw_payload.get("type", "")
+        if event_type not in settings.rl_attentive_allowed_events:
+            logger.debug(
+                f"� Attentive event filtered (not in allowlist): {event_type}"
+            )
+            return {
+                "success": True,
+                "message": f"Event type '{event_type}' filtered by allowlist",
+                "filtered": True,
+            }
+
+        # ---- Validate payload --------------------------------------------
         try:
             validated_request = AttentiveWebhookRequest(**raw_payload)
             logger.info(f"📨 Received Attentive webhook: {validated_request.type}")
         except Exception as validation_error:
             logger.error(f"❌ Attentive webhook validation failed: {validation_error}")
-            logger.error(f"❌ Raw payload that failed validation: {raw_payload}")
             raise HTTPException(
                 status_code=422,
                 detail={
                     "success": False,
                     "error": "Validation failed",
                     "message": str(validation_error),
-                    "payload": raw_payload
                 }
             )
-        
+
+        # ---- Enqueue for async processing --------------------------------
+        pool = get_worker_pool()
+        if pool is not None:
+            ok = await pool.enqueue(raw_payload)
+            if not ok:
+                logger.warning("🚦 Attentive webhook queue full — returning 429")
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "success": False,
+                        "error": "Queue full",
+                        "message": "Too many pending webhooks, please retry later",
+                    }
+                )
+            depth = await pool.queue.depth()
+            logger.info(f"📨 Attentive webhook enqueued ({event_type}), queue depth={depth}")
+            return {
+                "success": True,
+                "message": f"Attentive {event_type} webhook accepted for processing",
+                "queued": True,
+                "queue_depth": depth,
+            }
+
+        # ---- Fallback: inline processing (pool not started) ---------------
+        logger.warning("⚠️ Worker pool not available, processing Attentive webhook inline")
         result = await service.process_attentive_webhook(validated_request)
-        
-        logger.info(f"✅ Attentive webhook processed successfully: {validated_request.type}")
         return {
             "success": True,
-            "message": f"Attentive {validated_request.type} webhook processed successfully",
-            "data": result
+            "message": f"Attentive {event_type} webhook processed (inline)",
+            "data": result,
         }
-        
+
+    except HTTPException:
+        raise
     except APIInboxServiceError as e:
         logger.error(f"❌ Attentive webhook processing failed: {str(e)}")
         raise HTTPException(
@@ -381,6 +424,119 @@ async def _process_loopmessage_outbound_webhook(
         
     except Exception as e:
         logger.error(f"❌ Unexpected error in background LoopMessage outbound webhook: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Mailgun direct email send
+# ---------------------------------------------------------------------------
+
+@api_inbox_router.post("/mailgun/email/send")
+async def post_mailgun_email_send(
+    request: MailgunSendEmailRequest,
+) -> Dict[str, Any]:
+    """
+    Send an email directly via Mailgun API.
+
+    This is a standalone endpoint for ad-hoc / testing Mailgun sends.
+    It does NOT create Chatwoot contacts or conversations.
+
+    Requires CW_BRIDGE__mailgun__* config to be set.
+    """
+    from vital_chatwoot_bridge.core.config import get_settings
+    from vital_chatwoot_bridge.integrations.mailgun_client import MailgunClient, MailgunClientError
+
+    settings = get_settings()
+    if not settings.mailgun:
+        raise HTTPException(status_code=501, detail="Mailgun is not configured")
+
+    if not request.html and not request.text:
+        raise HTTPException(status_code=422, detail="At least one of 'html' or 'text' must be provided")
+
+    client = MailgunClient(settings.mailgun)
+    try:
+        result = await client.send_email(
+            to=request.to,
+            subject=request.subject,
+            html=request.html,
+            text=request.text,
+            from_email=request.from_email,
+            cc=request.cc,
+            bcc=request.bcc,
+            reply_to=request.reply_to,
+        )
+        return {
+            "success": True,
+            "message": "Email sent via Mailgun",
+            "data": result,
+        }
+    except MailgunClientError as e:
+        logger.error(f"❌ Mailgun send failed: {e}")
+        raise HTTPException(
+            status_code=e.status_code or 502,
+            detail={"success": False, "error": str(e), "response": e.response_data},
+        )
+    except Exception as e:
+        logger.error(f"❌ Unexpected error in Mailgun send: {e}")
+        raise HTTPException(status_code=500, detail={"success": False, "error": str(e)})
+    finally:
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Gmail direct email send
+# ---------------------------------------------------------------------------
+
+@api_inbox_router.post("/gmail/email/send")
+async def post_gmail_email_send(
+    request: GmailSendEmailRequest,
+) -> Dict[str, Any]:
+    """
+    Send an email directly via Gmail API (service account impersonation).
+
+    This is a standalone endpoint for ad-hoc / testing Gmail sends.
+    It does NOT create Chatwoot contacts or conversations.
+    It does NOT inject tracking (use POST /messages with content_mode='gmail_template' for that).
+
+    Requires CW_BRIDGE__google__* config to be set.
+    Sender must be in the allowed senders whitelist.
+    """
+    from vital_chatwoot_bridge.core.config import get_settings
+    from vital_chatwoot_bridge.integrations.gmail_client import GmailClient, GmailClientError
+
+    settings = get_settings()
+    if not settings.google:
+        raise HTTPException(status_code=501, detail="Google/Gmail is not configured")
+
+    if not request.html and not request.text:
+        raise HTTPException(status_code=422, detail="At least one of 'html' or 'text' must be provided")
+
+    client = GmailClient(settings.google)
+    try:
+        result = await client.send_email(
+            sender_email=request.sender,
+            to=request.to,
+            subject=request.subject,
+            html=request.html or "",
+            text=request.text,
+            cc=request.cc,
+            bcc=request.bcc,
+        )
+        return {
+            "success": True,
+            "message": "Email sent via Gmail",
+            "data": result,
+        }
+    except GmailClientError as e:
+        logger.error(f"❌ Gmail send failed: {e}")
+        raise HTTPException(
+            status_code=e.status_code or 502,
+            detail={"success": False, "error": str(e), "response": e.response_data},
+        )
+    except Exception as e:
+        logger.error(f"❌ Unexpected error in Gmail send: {e}")
+        raise HTTPException(status_code=500, detail={"success": False, "error": str(e)})
+    finally:
+        await client.close()
 
 
 # Note: Exception handlers are handled in individual endpoint try/catch blocks

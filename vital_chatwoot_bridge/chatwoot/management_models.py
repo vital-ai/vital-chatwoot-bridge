@@ -4,7 +4,7 @@ Request/response models with standardized pagination envelope.
 """
 
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ── Pagination envelope ──────────────────────────────────────────────
@@ -83,6 +83,28 @@ class UpdateConversationRequest(BaseModel):
     custom_attributes: Optional[Dict[str, Any]] = Field(None, description="Custom attributes")
 
 
+# ── Attachment models ────────────────────────────────────────────────
+
+class AttachmentInput(BaseModel):
+    """Attachment input for the post-message endpoint.
+
+    Provide either `data` (base64-encoded content) or `url` (URL to fetch),
+    but not both.
+    """
+    filename: str = Field(..., description="Original filename including extension")
+    content_type: str = Field(default="application/octet-stream", description="MIME type")
+    data: Optional[str] = Field(None, description="Base64-encoded file content")
+    url: Optional[str] = Field(None, description="URL to fetch file content from")
+
+    @model_validator(mode="after")
+    def _require_data_or_url(self):
+        if not self.data and not self.url:
+            raise ValueError("Either 'data' (base64) or 'url' must be provided")
+        if self.data and self.url:
+            raise ValueError("Provide either 'data' or 'url', not both")
+        return self
+
+
 # ── Message models ───────────────────────────────────────────────────
 
 class PostMessageContact(BaseModel):
@@ -111,6 +133,48 @@ class PostMessageRequest(BaseModel):
         description="'reuse_newest' (default): reuse most recent open conversation; 'create_new': always create a new conversation",
     )
     suppress_delivery: bool = Field(default=False, description="Log only, do not dispatch (outbound only)")
+    subject: Optional[str] = Field(None, description="Email subject line (email inboxes only)")
     to_emails: Optional[str] = Field(None, description="Explicit email recipients, comma-separated (outbound only)")
     cc_emails: Optional[str] = Field(None, description="CC recipients, comma-separated (outbound only)")
     bcc_emails: Optional[str] = Field(None, description="BCC recipients, comma-separated (outbound only)")
+    from_email: Optional[str] = Field(None, description="Sender address override (Mailgun html/template modes only)")
+    attachments: Optional[List[AttachmentInput]] = Field(None, description="File attachments (base64 or URL)")
+    content_attributes: Optional[Dict[str, Any]] = Field(None, description="Chatwoot content_attributes (e.g. email html_content)")
+    content_mode: str = Field(
+        default="text",
+        description=(
+            "How the message content is handled: "
+            "'text' (plain text via Chatwoot), "
+            "'markdown' (markdown via Chatwoot), "
+            "'html' (raw HTML sent via Mailgun, recorded in Chatwoot), "
+            "'template' (Jinja template rendered + sent via Mailgun, recorded in Chatwoot), "
+            "'gmail_template' (Jinja template rendered + sent via Gmail API, recorded in Chatwoot)"
+        ),
+    )
+    template_name: Optional[str] = Field(None, description="Jinja2 template name (required when content_mode='template' or 'gmail_template')")
+    template_vars: Optional[Dict[str, Any]] = Field(None, description="Template variables (used when content_mode='template' or 'gmail_template')")
+    # Gmail-specific fields (used when content_mode='gmail_template')
+    gmail_sender: Optional[str] = Field(
+        None,
+        description="Sender email for Gmail delivery (must be in whitelist). Required when content_mode='gmail_template'.",
+    )
+    enable_open_tracking: bool = Field(
+        default=False,
+        description="Inject open-tracking pixel into rendered template. Only with content_mode='gmail_template'.",
+    )
+    enable_click_tracking: bool = Field(
+        default=False,
+        description="Wrap CTA link with click-tracking redirect. Only with content_mode='gmail_template'.",
+    )
+    cta_url: Optional[str] = Field(
+        None,
+        description="CTA destination URL (wrapped for click tracking). Only used when enable_click_tracking=True.",
+    )
+    campaign: Optional[str] = Field(
+        None,
+        description="Campaign tag for tracking (overrides config default).",
+    )
+    lead_id: Optional[str] = Field(
+        None,
+        description="Lead ID for tracking attribution.",
+    )

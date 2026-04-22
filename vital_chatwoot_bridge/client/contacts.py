@@ -32,10 +32,12 @@ class ContactsMixin:
         return SingleResponse(**data)
 
     async def get_contact_conversations(
-        self, contact_id: int, page: int = 1
+        self, contact_id: int, page: int = 1, inbox_id: Optional[int] = None
     ) -> PaginatedResponse:
-        """List conversations for a contact."""
+        """List conversations for a contact. Optionally filter by inbox_id."""
         params: Dict[str, Any] = {"page": page}
+        if inbox_id is not None:
+            params["inbox_id"] = inbox_id
         data = await self.get(
             f"/api/v1/chatwoot/contacts/{contact_id}/conversations", params=params
         )

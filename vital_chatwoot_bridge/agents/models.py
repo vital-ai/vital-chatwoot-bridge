@@ -54,6 +54,7 @@ class AgentChatResponse(BaseModel):
     content: str = Field(..., description="AI response content")
     response_type: ResponseMode = Field(..., description="Response handling mode")
     metadata: Optional[AgentResponseMetadata] = Field(None, description="Response metadata")
+    deliver_to_chatwoot: bool = Field(default=False, description="Post response to Chatwoot (agent sets isDirectMessageResponse)")
     success: bool = Field(default=True, description="Whether response was successful")
     error_message: Optional[str] = Field(None, description="Error message if unsuccessful")
 

@@ -3,9 +3,11 @@ Pydantic models for Chatwoot Client API operations.
 These models handle the public API endpoints used for API inbox integrations.
 """
 
-from typing import Dict, Any, Optional, List, Literal, Union
+from typing import Dict, Any, Optional, List, Literal, Sequence, Union
 from datetime import datetime
 from pydantic import BaseModel, Field, validator
+
+from vital_chatwoot_bridge.chatwoot.models import ChatwootAttachment
 
 
 class ChatwootContact(BaseModel):
@@ -49,8 +51,11 @@ class ChatwootClientMessage(BaseModel):
     """Message model for Chatwoot Client API."""
     content: str = Field(..., description="Message content")
     message_type: Literal["incoming", "outgoing"] = Field(default="incoming", description="Message direction")
+    content_type: str = Field(default="text", description="Content type ('text', 'input_email', etc.)")
+    content_attributes: Optional[Dict[str, Any]] = Field(None, description="Additional content attributes")
     echo_id: Optional[str] = Field(None, description="Temporary identifier for WebSocket responses")
-    attachments: Optional[List[Dict[str, Any]]] = Field(None, description="Message attachments")
+    attachments: Optional[List[Dict[str, Any]]] = Field(None, description="Message attachments (signed IDs)")
+    file_attachments: Optional[Sequence[ChatwootAttachment]] = Field(None, description="File attachments for multipart upload")
     
     @validator('content')
     def validate_content(cls, v):
