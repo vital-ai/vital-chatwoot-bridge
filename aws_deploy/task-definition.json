@@ -35,7 +35,73 @@
         { "name": "CW_BRIDGE__timeouts__response", "value": "30" },
         { "name": "CW_BRIDGE__websocket__connect_timeout", "value": "10" },
         { "name": "CW_BRIDGE__websocket__ping_interval", "value": "30" },
-        { "name": "CW_BRIDGE__websocket__ping_timeout", "value": "10" }
+        { "name": "CW_BRIDGE__websocket__ping_timeout", "value": "10" },
+
+        { "name": "CW_BRIDGE__inbox_agents__1__inbox_name", "value": "Cardiff Agent" },
+        { "name": "CW_BRIDGE__inbox_agents__1__agent_id", "value": "cardiff-sales-agent" },
+        { "name": "CW_BRIDGE__inbox_agents__1__websocket_url", "value": "http://agents-internal.cardiffbank.co:6006" },
+        { "name": "CW_BRIDGE__inbox_agents__1__timeout_seconds", "value": "30" },
+        { "name": "CW_BRIDGE__inbox_agents__1__bot", "value": "default" },
+
+        { "name": "CW_BRIDGE__inbox_agents__13__inbox_name", "value": "CarlyAgent" },
+        { "name": "CW_BRIDGE__inbox_agents__13__aimp_intent_type", "value": "urn:cardiff_sales_agent_app_completion" },
+        { "name": "CW_BRIDGE__inbox_agents__13__agent_id", "value": "cardiff-sales-agent" },
+        { "name": "CW_BRIDGE__inbox_agents__13__websocket_url", "value": "http://agents-internal.cardiffbank.co:6006" },
+        { "name": "CW_BRIDGE__inbox_agents__13__timeout_seconds", "value": "30" },
+        { "name": "CW_BRIDGE__inbox_agents__13__bot", "value": "default" },
+
+        { "name": "CW_BRIDGE__inbox_agents__14__inbox_name", "value": "ReedAgent" },
+        { "name": "CW_BRIDGE__inbox_agents__14__aimp_intent_type", "value": "urn:cardiff_sales_agent_app_completion" },
+        { "name": "CW_BRIDGE__inbox_agents__14__agent_id", "value": "cardiff-sales-agent" },
+        { "name": "CW_BRIDGE__inbox_agents__14__websocket_url", "value": "http://agents-internal.cardiffbank.co:6006" },
+        { "name": "CW_BRIDGE__inbox_agents__14__timeout_seconds", "value": "30" },
+        { "name": "CW_BRIDGE__inbox_agents__14__bot", "value": "default" },
+
+        { "name": "CW_BRIDGE__inbox_agents__15__inbox_name", "value": "MorganAgent" },
+        { "name": "CW_BRIDGE__inbox_agents__15__aimp_intent_type", "value": "urn:cardiff_sales_agent_app_completion" },
+        { "name": "CW_BRIDGE__inbox_agents__15__agent_id", "value": "cardiff-sales-agent" },
+        { "name": "CW_BRIDGE__inbox_agents__15__websocket_url", "value": "http://agents-internal.cardiffbank.co:6006" },
+        { "name": "CW_BRIDGE__inbox_agents__15__timeout_seconds", "value": "30" },
+        { "name": "CW_BRIDGE__inbox_agents__15__bot", "value": "default" },
+
+        { "name": "CW_BRIDGE__api_inboxes__loopmessage__inbox_identifier", "value": "NUCyR3zVNKSVLmfxktmiZq6e" },
+        { "name": "CW_BRIDGE__api_inboxes__loopmessage__chatwoot_inbox_id", "value": "6" },
+        { "name": "CW_BRIDGE__api_inboxes__loopmessage__name", "value": "LoopMessage iMessages" },
+        { "name": "CW_BRIDGE__api_inboxes__loopmessage__message_types", "value": "imessage" },
+        { "name": "CW_BRIDGE__api_inboxes__loopmessage__contact_identifier_field", "value": "phone_number" },
+        { "name": "CW_BRIDGE__api_inboxes__loopmessage__supports_outbound", "value": "true" },
+
+        { "name": "CW_BRIDGE__api_inboxes__attentive__inbox_identifier", "value": "azDPkpPte5XNFhJR9rt7mWDt" },
+        { "name": "CW_BRIDGE__api_inboxes__attentive__chatwoot_inbox_id", "value": "3" },
+        { "name": "CW_BRIDGE__api_inboxes__attentive__name", "value": "Attentive Messages" },
+        { "name": "CW_BRIDGE__api_inboxes__attentive__message_types", "value": "email,sms" },
+        { "name": "CW_BRIDGE__api_inboxes__attentive__contact_identifier_field", "value": "email_or_phone" },
+        { "name": "CW_BRIDGE__api_inboxes__attentive__supports_outbound", "value": "false" },
+        { "name": "CW_BRIDGE__api_inboxes__attentive__supports_email_replies", "value": "true" },
+
+        { "name": "CW_BRIDGE__email_templates__s3_bucket", "value": "cardiff-chatwoot-bridge-assets" },
+        { "name": "CW_BRIDGE__email_templates__s3_region", "value": "us-east-1" },
+        { "name": "CW_BRIDGE__email_templates__asset_base_url", "value": "https://assets.cardiff.co" },
+        { "name": "CW_BRIDGE__email_templates__defaults__company_name", "value": "Cardiff" },
+        { "name": "CW_BRIDGE__email_templates__defaults__button_color", "value": "#ffa400" },
+        { "name": "CW_BRIDGE__email_templates__templates__cerberus__s3_key", "value": "templates/email/cerberus-responsive.html.j2" },
+        { "name": "CW_BRIDGE__email_templates__templates__cerberus__subject_default", "value": "{{ title | default(\"Notification\") }}" },
+        { "name": "CW_BRIDGE__email_templates__templates__cerberus__description", "value": "Responsive email template based on Cerberus by TedGoas" },
+        { "name": "CW_BRIDGE__email_templates__templates__gmail_outreach__s3_key", "value": "templates/email/gmail_outreach.html.j2" },
+        { "name": "CW_BRIDGE__email_templates__templates__gmail_outreach__subject_default", "value": "{{ subject }}" },
+        { "name": "CW_BRIDGE__email_templates__templates__gmail_outreach__description", "value": "Gmail 1:1 outreach email with optional CTA and tracking" },
+        { "name": "CW_BRIDGE__email_templates__templates__gmail_outreach_inline_cta__s3_key", "value": "templates/email/gmail_outreach_inline_cta.html.j2" },
+        { "name": "CW_BRIDGE__email_templates__templates__gmail_outreach_inline_cta__subject_default", "value": "{{ subject }}" },
+        { "name": "CW_BRIDGE__email_templates__templates__gmail_outreach_inline_cta__description", "value": "Gmail outreach email with inline CTA link in body text" },
+
+        { "name": "CW_BRIDGE__rate_limiting__queue_backend", "value": "memory" },
+        { "name": "CW_BRIDGE__rate_limiting__max_chatwoot_concurrency", "value": "3" },
+        { "name": "CW_BRIDGE__rate_limiting__attentive_workers", "value": "3" },
+        { "name": "CW_BRIDGE__rate_limiting__attentive_queue_size", "value": "5000" },
+        { "name": "CW_BRIDGE__rate_limiting__attentive_allowed_events", "value": "sms.sent,sms.inbound_message" },
+        { "name": "CW_BRIDGE__rate_limiting__contact_cache_ttl", "value": "300" },
+        { "name": "CW_BRIDGE__rate_limiting__retry_max_attempts", "value": "3" },
+        { "name": "CW_BRIDGE__rate_limiting__retry_base_delay", "value": "1.0" }
       ],
       "secrets": [
         {
@@ -71,6 +137,14 @@
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/keycloak-client-secret-XXXXXX"
         },
         {
+          "name": "CW_BRIDGE__keycloak__user",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/keycloak-user-XXXXXX"
+        },
+        {
+          "name": "CW_BRIDGE__keycloak__password",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/keycloak-password-XXXXXX"
+        },
+        {
           "name": "CW_BRIDGE__loopmessage__api_url",
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/loopmessage-api-url-XXXXXX"
         },
@@ -85,6 +159,58 @@
         {
           "name": "CW_BRIDGE__loopmessage__sender_name",
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/loopmessage-sender-name-XXXXXX"
+        },
+        {
+          "name": "CW_BRIDGE__mailgun__api_key",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/mailgun-api-key-XXXXXX"
+        },
+        {
+          "name": "CW_BRIDGE__mailgun__domain",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/mailgun-domain-XXXXXX"
+        },
+        {
+          "name": "CW_BRIDGE__mailgun__from_email",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/mailgun-from-email-XXXXXX"
+        },
+        {
+          "name": "CW_BRIDGE__mailgun__sending_key_name",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/mailgun-sending-key-name-XXXXXX"
+        },
+        {
+          "name": "CW_BRIDGE__aws__region",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/aws-region-XXXXXX"
+        },
+        {
+          "name": "CW_BRIDGE__google__service_account_json",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/google-service-account-json-XXXXXX"
+        },
+        {
+          "name": "CW_BRIDGE__google__senders__jordan__email",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/google-senders-jordan-email-XXXXXX"
+        },
+        {
+          "name": "CW_BRIDGE__google__senders__jordan__display_name",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/google-senders-jordan-display-name-XXXXXX"
+        },
+        {
+          "name": "CW_BRIDGE__google__senders__jordan__reply_to",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/google-senders-jordan-reply-to-XXXXXX"
+        },
+        {
+          "name": "CW_BRIDGE__google__senders__jordan__default_inbox_id",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/google-senders-jordan-default-inbox-id-XXXXXX"
+        },
+        {
+          "name": "CW_BRIDGE__google__tracking__pixel_url",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/google-tracking-pixel-url-XXXXXX"
+        },
+        {
+          "name": "CW_BRIDGE__google__tracking__click_url",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/google-tracking-click-url-XXXXXX"
+        },
+        {
+          "name": "CW_BRIDGE__google__tracking__default_campaign",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/google-tracking-default-campaign-XXXXXX"
         }
       ],
       "logConfiguration": {

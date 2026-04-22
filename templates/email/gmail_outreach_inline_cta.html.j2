@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: Arial, sans-serif; font-size: 14px; color: #333;
+             line-height: 1.6; margin: 0; padding: 20px;">
+
+  <p>Hi {{ recipient_name }},</p>
+
+  {{ body_text | safe }}
+
+  <p>Best,<br>
+  {{ sender_name }}
+  {% if sender_title %}<br><span style="color: #666; font-size: 13px;">{{ sender_title }}</span>{% endif %}
+  {% if company_name %}<br><span style="color: #666; font-size: 13px;">{{ company_name }}</span>{% endif %}
+  </p>
+
+  {% if signature_html %}
+  {{ signature_html | safe }}
+  {% endif %}
+
+  <!-- TRACKING_PIXEL -->
+</body>
+</html>

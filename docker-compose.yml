@@ -12,7 +12,6 @@ services:
       - CW_BRIDGE__app__port=8009
       - CW_BRIDGE__app__host=0.0.0.0
       - CW_BRIDGE__app__debug=false
-      
     env_file:
       - .env
     restart: unless-stopped
