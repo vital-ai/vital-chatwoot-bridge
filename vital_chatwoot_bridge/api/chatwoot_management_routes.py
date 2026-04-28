@@ -604,6 +604,17 @@ async def post_message(
             else:
                 # html mode — message.content IS the raw HTML
                 html_content = body.message.content
+                # Wrap bare HTML in a proper document if missing <html> tag
+                if "<html" not in html_content.lower():
+                    html_content = (
+                        "<!DOCTYPE html>\n"
+                        '<html lang="en">\n<head>\n'
+                        '<meta charset="utf-8">\n'
+                        '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
+                        "</head>\n<body>\n"
+                        f"{html_content}\n"
+                        "</body>\n</html>"
+                    )
 
             # Send via Mailgun
             mg_client = MailgunClient(_cfg.mailgun)
