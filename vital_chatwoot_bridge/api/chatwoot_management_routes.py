@@ -802,8 +802,23 @@ async def post_message(
         # -----------------------------------------------------------------
         # Step 3c (text / markdown): Build and send via Chatwoot as before
         # -----------------------------------------------------------------
+
+        # URL shortening for outbound SMS
+        content = body.message.content
+        if body.direction == "outbound" and not body.suppress_delivery:
+            from vital_chatwoot_bridge.core.config import get_settings as _get_settings
+            _cfg = _get_settings()
+            if (_cfg.url_shortener
+                    and _cfg.url_shortener.enabled
+                    and (not _cfg.url_shortener.sms_only
+                         or str(inbox_id) in _cfg.url_shortener.sms_inbox_ids)):
+                from vital_chatwoot_bridge.integrations.url_shortener import get_shortener
+                shortener = get_shortener()
+                if shortener:
+                    content = await shortener.shorten_urls_in_text(content)
+
         msg_payload = {
-            "content": body.message.content,
+            "content": content,
             "content_type": body.message.content_type,
             "private": False,
         }

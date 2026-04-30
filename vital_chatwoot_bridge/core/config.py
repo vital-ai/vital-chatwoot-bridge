@@ -66,6 +66,16 @@ class APIInboxConfig(BaseModel):
     hmac_secret: Optional[str] = Field(None, description="HMAC secret for webhook verification")
 
 
+class URLShortenerConfig(BaseModel):
+    """URL shortener configuration."""
+    provider: str = Field(default="short_io", description="Shortener provider (short_io)")
+    api_key: str = Field(..., description="Provider API key")
+    domain: str = Field(..., description="Custom branded domain for short links")
+    enabled: bool = Field(default=True, description="Enable/disable URL shortening")
+    sms_only: bool = Field(default=True, description="Only shorten URLs in SMS messages")
+    sms_inbox_ids: List[str] = Field(default_factory=list, description="Chatwoot inbox IDs that are SMS (for sms_only filtering)")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -185,6 +195,11 @@ class Config:
         # -- Google / Gmail (CW_BRIDGE__google__*) --
         self.google: Optional[GmailConfig] = self._parse_google(
             env_tree.get("google", {})
+        )
+
+        # -- URL Shortener (CW_BRIDGE__url_shortener__*) --
+        self.url_shortener: Optional[URLShortenerConfig] = self._parse_url_shortener(
+            env_tree.get("url_shortener", {})
         )
 
         # -- Rate Limiting (CW_BRIDGE__rate_limiting__*) --
@@ -358,6 +373,30 @@ class Config:
             return config
         except Exception as e:
             logger.error(f"❌ CONFIG: Failed to parse Google config: {e}")
+            return None
+
+    @staticmethod
+    def _parse_url_shortener(tree: Dict[str, Any]) -> Optional[URLShortenerConfig]:
+        """Build URLShortenerConfig from CW_BRIDGE__url_shortener__* env vars."""
+        if not isinstance(tree, dict) or "api_key" not in tree:
+            return None
+        try:
+            prepared = dict(tree)
+            # Handle boolean fields
+            for bool_field in ("enabled", "sms_only"):
+                if bool_field in prepared and isinstance(prepared[bool_field], str):
+                    prepared[bool_field] = prepared[bool_field].lower() == "true"
+            # Handle comma-separated sms_inbox_ids
+            if "sms_inbox_ids" in prepared and isinstance(prepared["sms_inbox_ids"], str):
+                prepared["sms_inbox_ids"] = [s.strip() for s in prepared["sms_inbox_ids"].split(",") if s.strip()]
+            config = URLShortenerConfig(**prepared)
+            logger.info(
+                f"🔗 CONFIG: URL shortener configured — provider={config.provider}, "
+                f"domain={config.domain}, enabled={config.enabled}"
+            )
+            return config
+        except Exception as e:
+            logger.error(f"❌ CONFIG: Failed to parse URL shortener config: {e}")
             return None
 
     # -------------------------------------------------------------------
