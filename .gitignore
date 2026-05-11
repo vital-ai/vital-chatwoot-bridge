@@ -224,3 +224,5 @@ node_modules/
 # Temporary folders
 tmp/
 temp/
+
+data

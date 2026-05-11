@@ -94,9 +94,19 @@
         { "name": "CW_BRIDGE__rate_limiting__attentive_allowed_events", "value": "sms.sent,sms.inbound_message" },
         { "name": "CW_BRIDGE__rate_limiting__contact_cache_ttl", "value": "300" },
         { "name": "CW_BRIDGE__rate_limiting__retry_max_attempts", "value": "3" },
-        { "name": "CW_BRIDGE__rate_limiting__retry_base_delay", "value": "1.0" }
+        { "name": "CW_BRIDGE__rate_limiting__retry_base_delay", "value": "1.0" },
+
+        { "name": "CW_BRIDGE__url_shortener__provider", "value": "short_io" },
+        { "name": "CW_BRIDGE__url_shortener__domain", "value": "go.example.org" },
+        { "name": "CW_BRIDGE__url_shortener__enabled", "value": "true" },
+        { "name": "CW_BRIDGE__url_shortener__sms_only", "value": "true" },
+        { "name": "CW_BRIDGE__url_shortener__sms_inbox_ids", "value": "2" }
       ],
       "secrets": [
+        {
+          "name": "CW_BRIDGE__url_shortener__api_key",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/url-shortener-api-key-XXXXXX"
+        },
         {
           "name": "CW_BRIDGE__chatwoot__base_url",
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/chatwoot-base-url-XXXXXX"

@@ -15,6 +15,7 @@ class ConversationsMixin:
         page: int = 1,
         status: Optional[str] = None,
         assignee_type: Optional[str] = None,
+        inbox_id: Optional[int] = None,
     ) -> PaginatedResponse:
         """List conversations (paginated, filterable by status)."""
         params: Dict[str, Any] = {"page": page}
@@ -22,6 +23,8 @@ class ConversationsMixin:
             params["status"] = status
         if assignee_type:
             params["assignee_type"] = assignee_type
+        if inbox_id is not None:
+            params["inbox_id"] = inbox_id
         data = await self.get("/api/v1/chatwoot/conversations", params=params)
         return PaginatedResponse(**data)
 

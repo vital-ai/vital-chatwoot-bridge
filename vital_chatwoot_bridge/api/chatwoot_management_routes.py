@@ -285,13 +285,15 @@ async def list_conversations(
     page: int = 1,
     status: Optional[str] = None,
     assignee_type: Optional[str] = None,
+    inbox_id: Optional[int] = None,
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """List conversations (paginated, filterable by status)."""
     try:
         client = await get_chatwoot_client()
         data = await client.list_conversations_raw(
-            _account_id(), page=page, status=status, assignee_type=assignee_type
+            _account_id(), page=page, status=status, assignee_type=assignee_type,
+            inbox_id=inbox_id
         )
         conv_data = data.get("data", {})
         payload = conv_data.get("payload", [])
@@ -550,6 +552,13 @@ async def post_message(
         )
 
     try:
+        logger.info(
+            f"POST /messages request: direction={body.direction}, inbox_id={body.inbox_id}, "
+            f"contact={{identifier={body.contact.identifier!r}, name={body.contact.name!r}, "
+            f"email={body.contact.email!r}, phone_number={body.contact.phone_number!r}}}, "
+            f"conversation_id={body.conversation_id}, conversation_mode={body.conversation_mode}"
+        )
+
         client = await get_chatwoot_client()
         account_id = _account_id()
 
@@ -569,10 +578,12 @@ async def post_message(
             )
 
         # Step 2: Find or create conversation
+        contact_phone = contact.get("phone_number") or _normalize_phone(body.contact.identifier) or None
         conversation_id = body.conversation_id
         if not conversation_id:
             conversation_id = await _resolve_conversation(
-                client, account_id, inbox_id, contact_id, body.conversation_mode
+                client, account_id, inbox_id, contact_id, body.conversation_mode,
+                source_id=contact_phone,
             )
 
         # -----------------------------------------------------------------
@@ -1180,6 +1191,197 @@ async def get_communications(
         )
 
 
+# ── Inbox Inbound Messages ────────────────────────────────────────────
+
+MAX_INBOX_CONV_PAGES = 20  # max conversation pages to scan per status
+DEFAULT_INBOUND_LIMIT = 10
+MAX_INBOUND_LIMIT = 200
+
+
+@router.get("/inboxes/{inbox_id}/messages/inbound", response_model=SingleResponse)
+async def list_inbound_messages(
+    inbox_id: int,
+    before: Optional[int] = None,
+    limit: int = DEFAULT_INBOUND_LIMIT,
+    status: Optional[str] = None,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """List recent inbound (incoming) messages for an inbox, newest first.
+
+    Supports cursor-based pagination via the ``before`` parameter:
+    pass the ``next_before`` value from a previous response to fetch
+    the next page of older messages.
+
+    Args:
+        inbox_id: Chatwoot inbox ID to query.
+        before: Optional message ID cursor — only return messages with
+                ID less than this value (i.e. older messages).
+        limit: Max messages to return (default 50, max 200).
+        status: Optional conversation status filter (open, resolved,
+                pending). Omit to include all statuses.
+    """
+    if limit < 1:
+        limit = DEFAULT_INBOUND_LIMIT
+    if limit > MAX_INBOUND_LIMIT:
+        limit = MAX_INBOUND_LIMIT
+
+    try:
+        client = await get_chatwoot_client()
+        account_id = _account_id()
+        inbox_cache = get_inbox_cache()
+
+        # Collect inbound messages across conversations in this inbox
+        inbound_messages: List[Dict[str, Any]] = []
+        # We need limit+1 to detect has_more
+        target = limit + 1
+
+        # Chatwoot's GET /conversations supports inbox_id filtering via the
+        # ConversationFinder. Key: pass status=all to include all statuses
+        # (default is 'open' only).
+        conv_status = status if status else "all"
+
+        # Conversations come sorted by last_activity_at desc from Chatwoot.
+        # Process sequentially: fetch messages for each conversation, fill a
+        # sorted queue of size target. Stop when the next conversation's
+        # last_activity_at < the oldest message in the queue.
+        done = False
+
+        for pg in range(1, MAX_INBOX_CONV_PAGES + 1):
+            if done:
+                break
+            try:
+                data = await client.list_conversations_raw(
+                    account_id, page=pg, status=conv_status, inbox_id=inbox_id
+                )
+            except ChatwootAPIError:
+                break
+            conv_payload = data.get("data", {}).get("payload", [])
+            if not conv_payload:
+                break
+
+            for conv in conv_payload:
+                cid = int(conv["id"])
+                conv_activity = conv.get("last_activity_at") or 0
+
+                # Stop: queue full and this conv's activity is older than
+                # the oldest message in our queue
+                if len(inbound_messages) >= target:
+                    if conv_activity < inbound_messages[-1].get("created_at", 0):
+                        done = True
+                        break
+
+                # Skip: queue full and this conv's newest real message is
+                # older than queue's oldest — no message here can displace
+                # a queue entry
+                if len(inbound_messages) >= target:
+                    last_msg = conv.get("last_non_activity_message") or {}
+                    last_msg_ts = last_msg.get("created_at", 0)
+                    if last_msg_ts < inbound_messages[-1].get("created_at", 0):
+                        continue
+
+                # Fetch messages for this conversation
+                try:
+                    msg_data = await client.get_conversation_messages_raw(
+                        account_id, cid, before=before
+                    )
+                except ChatwootAPIError:
+                    continue
+
+                pre_count = len(inbound_messages)
+                for m in msg_data.get("payload", []):
+                    if m.get("message_type") not in (0, "incoming"):
+                        continue
+                    msg_id = m.get("id")
+                    if before is not None and msg_id is not None and msg_id >= before:
+                        continue
+                    m["_conversation_id"] = cid
+                    msg_ts = m.get("created_at", 0)
+
+                    # Add to queue if not full, or replace oldest if newer
+                    if len(inbound_messages) < target:
+                        inbound_messages.append(m)
+                        inbound_messages.sort(
+                            key=lambda x: x.get("created_at", 0), reverse=True
+                        )
+                    elif msg_ts > inbound_messages[-1].get("created_at", 0):
+                        inbound_messages[-1] = m
+                        inbound_messages.sort(
+                            key=lambda x: x.get("created_at", 0), reverse=True
+                        )
+                added = len(inbound_messages) - pre_count
+                logger.info(
+                    f"conv {cid}: activity={conv_activity} added={added} "
+                    f"queue={len(inbound_messages)}/{target} "
+                    f"oldest={inbound_messages[-1].get('created_at') if inbound_messages else 'empty'}"
+                )
+
+        # Sort by message ID descending (IDs are sequential in Chatwoot)
+        inbound_messages.sort(key=lambda m: m.get("id", 0), reverse=True)
+
+        # Determine has_more
+        has_more = len(inbound_messages) > limit
+        page_messages = inbound_messages[:limit]
+
+        # Build enriched response
+        channel = await inbox_cache.get_channel(inbox_id)
+        inbox_name = await inbox_cache.get_inbox_name(inbox_id)
+
+        enriched: List[Dict[str, Any]] = []
+        for m in page_messages:
+            ts = _parse_message_created_at(m)
+            sender = m.get("sender") or {}
+            contact_info = {
+                "id": sender.get("id"),
+                "name": sender.get("name") or sender.get("available_name"),
+                "email": sender.get("email"),
+                "phone_number": sender.get("phone_number"),
+            }
+            ca = m.get("content_attributes") or {}
+            subject = (
+                ca.get("email", {}).get("subject")
+                if isinstance(ca.get("email"), dict) else None
+            )
+            enriched.append({
+                "id": m.get("id"),
+                "conversation_id": m.get("_conversation_id"),
+                "content": m.get("content") or "",
+                "content_type": m.get("content_type", "text"),
+                "channel": channel,
+                "subject": subject,
+                "sender": contact_info,
+                "created_at": ts,
+            })
+
+        # Pagination cursor
+        next_before = None
+        if has_more and page_messages:
+            next_before = page_messages[-1].get("id")
+
+        return SingleResponse(data={
+            "inbox_id": inbox_id,
+            "inbox_name": inbox_name,
+            "channel": channel,
+            "messages": enriched,
+            "pagination": {
+                "has_more": has_more,
+                "next_before": next_before,
+                "count": len(enriched),
+                "limit": limit,
+            },
+        })
+
+    except ChatwootAPIError as e:
+        raise _handle_api_error(e)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in list_inbound_messages: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list inbound messages: {str(e)}",
+        )
+
+
 # ── Agents ───────────────────────────────────────────────────────────
 
 @router.get("/agents", response_model=SingleResponse)
@@ -1212,15 +1414,31 @@ async def list_inboxes(
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
+def _normalize_phone(raw: str) -> str:
+    """Return E.164 phone string (+<digits>) or empty string if not a phone."""
+    digits = raw.lstrip("+")
+    if digits.isdigit() and len(digits) >= 10:
+        return f"+{digits}"
+    return ""
+
+
 async def _resolve_contact(client, account_id: int, inbox_id: int, contact_info) -> dict:
     """Find existing contact or create a new one."""
-    search_key = contact_info.phone_number or contact_info.email or contact_info.identifier
+    # Auto-infer phone_number from identifier when caller omits it
+    phone = contact_info.phone_number
+    if not phone and contact_info.identifier:
+        inferred = _normalize_phone(contact_info.identifier)
+        if inferred:
+            phone = inferred
+            logger.info(f"Auto-inferred phone_number={phone} from identifier={contact_info.identifier!r}")
+
+    search_key = phone or contact_info.email or contact_info.identifier
     if search_key:
         try:
             search_data = await client.search_contacts(account_id, q=search_key)
             contacts = search_data.get("payload", [])
             for c in contacts:
-                if (c.get("phone_number") == contact_info.phone_number or
+                if (c.get("phone_number") == phone or
                         c.get("email") == contact_info.email or
                         c.get("identifier") == contact_info.identifier):
                     logger.info(f"Found existing contact: {c['id']}")
@@ -1234,8 +1452,8 @@ async def _resolve_contact(client, account_id: int, inbox_id: int, contact_info)
         payload["name"] = contact_info.name
     if contact_info.email:
         payload["email"] = contact_info.email
-    if contact_info.phone_number:
-        payload["phone_number"] = contact_info.phone_number
+    if phone:
+        payload["phone_number"] = phone
     data = await client.create_contact_raw(account_id, payload)
     return data.get("payload", {}).get("contact", data)
 
@@ -1243,6 +1461,7 @@ async def _resolve_contact(client, account_id: int, inbox_id: int, contact_info)
 async def _resolve_conversation(
     client, account_id: int, inbox_id: int, contact_id: int,
     mode: str = "reuse_newest",
+    source_id: str = None,
 ) -> int:
     """Find or create a conversation based on mode.
 
@@ -1266,7 +1485,7 @@ async def _resolve_conversation(
     conv_payload = {
         "inbox_id": inbox_id,
         "contact_id": contact_id,
-        "source_id": f"contact_{contact_id}",
+        "source_id": source_id or f"contact_{contact_id}",
     }
     result = await client.create_conversation_raw(account_id, conv_payload)
     conv_id = result.get("id") or result.get("payload", {}).get("id")

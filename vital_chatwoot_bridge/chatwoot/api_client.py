@@ -844,7 +844,8 @@ class ChatwootAPIClient:
         account_id: int,
         page: int = 1,
         status: Optional[str] = None,
-        assignee_type: Optional[str] = None
+        assignee_type: Optional[str] = None,
+        inbox_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """List conversations. Returns raw API response dict."""
         url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations"
@@ -853,6 +854,8 @@ class ChatwootAPIClient:
             params["status"] = status
         if assignee_type:
             params["assignee_type"] = assignee_type
+        if inbox_id is not None:
+            params["inbox_id"] = inbox_id
         try:
             response = await self.client.get(url, params=params)
             if response.status_code == 200:
@@ -865,6 +868,33 @@ class ChatwootAPIClient:
             raise
         except Exception as e:
             raise ChatwootAPIError(f"Error listing conversations: {e}")
+
+    async def filter_conversations_raw(
+        self,
+        account_id: int,
+        payload: List[Dict[str, Any]],
+        page: int = 1,
+    ) -> Dict[str, Any]:
+        """Filter conversations using structured filters. Returns raw API response dict.
+
+        Uses POST /api/v1/accounts/{account_id}/conversations/filter which
+        supports filtering by inbox_id, status, assignee, labels, etc.
+        """
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/filter"
+        params = {"page": page}
+        try:
+            response = await self.client.post(url, json={"payload": payload}, params=params)
+            if response.status_code == 200:
+                return response.json()
+            raise ChatwootAPIError(
+                f"Failed to filter conversations: HTTP {response.status_code}",
+                status_code=response.status_code,
+                response_data=self._safe_json(response),
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error filtering conversations: {e}")
 
     async def send_message_raw(
         self,
