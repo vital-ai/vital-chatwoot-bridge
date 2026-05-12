@@ -166,7 +166,8 @@ class WebhookHandler:
                             account_id,
                             conversation_id,
                             response.content,
-                            private=False
+                            private=False,
+                            inbox_id=inbox_id
                         )
                         delivered_count += 1
                     elif response.success:
@@ -464,9 +465,17 @@ class WebhookHandler:
             logger.error(f"Error sending message to agent: {str(e)}")
             return []
     
-    async def _post_response_to_chatwoot(self, account_id: int, conversation_id: int, content: str, private: bool = False):
+    async def _post_response_to_chatwoot(self, account_id: int, conversation_id: int, content: str, private: bool = False, inbox_id: str = None):
         """Post response back to Chatwoot."""
         try:
+            # URL shortening for SMS inboxes
+            if inbox_id and self.settings.url_shortener and self.settings.url_shortener.enabled:
+                if not self.settings.url_shortener.sms_only or str(inbox_id) in self.settings.url_shortener.sms_inbox_ids:
+                    from vital_chatwoot_bridge.integrations.url_shortener import get_shortener
+                    shortener = get_shortener()
+                    if shortener:
+                        content = await shortener.shorten_urls_in_text(content)
+
             await self.api_client.send_message(
                 account_id=account_id,
                 conversation_id=conversation_id,
