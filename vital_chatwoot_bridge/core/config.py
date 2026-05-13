@@ -48,6 +48,7 @@ class InboxMapping(BaseModel):
         default="http://vital.ai/ontology/vital-aimp#AIMPIntentType_CHAT",
         description="AIMP intent type URI sent to the agent for this inbox",
     )
+    from_email: Optional[str] = Field(default=None, description="Mailgun sender address for this inbox (e.g. carly@mg.cardiff.co)")
     agent_config: AgentConfig = Field(..., description="AI agent configuration")
 
 
@@ -252,11 +253,13 @@ class Config:
                 agent_fields = coerce_dict(fields)
                 inbox_name = agent_fields.pop("inbox_name", "")
                 aimp_intent_type = agent_fields.pop("aimp_intent_type", "http://vital.ai/ontology/vital-aimp#AIMPIntentType_CHAT")
+                from_email = agent_fields.pop("from_email", None)
                 agent_config = AgentConfig(**agent_fields)
                 mappings.append(InboxMapping(
                     inbox_id=inbox_id,
                     inbox_name=inbox_name,
                     aimp_intent_type=aimp_intent_type,
+                    from_email=from_email,
                     agent_config=agent_config,
                 ))
                 logger.info(f"📋 CONFIG: Loaded inbox agent mapping: inbox {inbox_id} → {agent_config.agent_id}")
@@ -443,6 +446,12 @@ class Config:
             if config.chatwoot_inbox_id == chatwoot_inbox_id:
                 return config
         return None
+
+    def is_sms_inbox(self, inbox_id: str) -> bool:
+        """Return True if *inbox_id* is configured as an SMS/Twilio inbox."""
+        if self.url_shortener and self.url_shortener.sms_inbox_ids:
+            return str(inbox_id) in self.url_shortener.sms_inbox_ids
+        return False
 
 
 @lru_cache()

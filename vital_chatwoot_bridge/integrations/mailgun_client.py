@@ -92,6 +92,10 @@ class MailgunClient:
         if reply_to:
             data["h:Reply-To"] = reply_to
 
+        # Disable open tracking (1x1 pixel) to reduce spam scoring;
+        # click tracking stays enabled for link analytics
+        data["o:tracking-opens"] = "no"
+
         try:
             logger.info(f"📧 Sending email via Mailgun to: {to}, subject: {subject}")
 

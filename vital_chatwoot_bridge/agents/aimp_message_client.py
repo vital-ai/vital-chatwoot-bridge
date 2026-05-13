@@ -167,7 +167,8 @@ class AimpMessageClient:
         aimp_msg.URI = URIGenerator.generate_uri()
         aimp_msg.aIMPIntentType = message.aimp_intent_type
         aimp_msg.accountURI = f"urn:account_{message.inbox_id}"
-        aimp_msg.username = message.sender.name or "chatwoot_user"
+        # username = sender identifier (phone or email) — used for manager detection
+        aimp_msg.username = message.sender.phone or message.sender.email or message.sender.name or "chatwoot_user"
         aimp_msg.userID = message.sender.id
         aimp_msg.sessionID = f"session_{message.message_id}"
         aimp_msg.authSessionID = f"session_{message.message_id}"
@@ -183,7 +184,6 @@ class AimpMessageClient:
         # Create user message content
         user_content = UserMessageContent()
         user_content.URI = URIGenerator.generate_uri()
-        user_content.text = message.content
 
         # Normalize Chatwoot channel string to short form expected by agent
         channel_map = {
@@ -201,24 +201,28 @@ class AimpMessageClient:
         raw_channel = message.context.channel or ""
         channel = channel_map.get(raw_channel, raw_channel.lower())
 
-        # Pack full context into messageContentJSON
-        # Fields aligned with what the agent handler extracts
-        content_json = {
+        # Pack context into messageContentJSON — only fields the agent needs.
+        # SMS:   sender_phone, message_body, channel
+        # Email: sender_email, message_body, subject (if present), channel
+        content_json: dict = {
             "message_body": message.content,
-            "subject": message.subject,
-            "sender_id": message.sender.id,
-            "sender_name": message.sender.name,
-            "sender_email": message.sender.email,
-            "sender_phone": message.sender.phone,
-            "sender_type": message.sender.type,
             "channel": channel,
-            "assigned_personality": message.inbox_name.lower().replace("agent", "").strip() or None,
-            "inbox_id": message.inbox_id,
-            "inbox_name": message.inbox_name,
-            "conversation_id": message.conversation_id,
-            "created_at": message.context.created_at.isoformat() if message.context.created_at else None,
-            "additional_attributes": message.context.additional_attributes or {},
         }
+
+        if channel == "sms":
+            if message.sender.phone:
+                content_json["sender_phone"] = message.sender.phone
+        elif channel == "email":
+            if message.sender.email:
+                content_json["sender_email"] = message.sender.email
+            if message.subject:
+                content_json["subject"] = message.subject
+
+        # assigned_personality — only for named agent inboxes (e.g. "CarlyAgent" → "carly")
+        if "agent" in message.inbox_name.lower():
+            personality = message.inbox_name.lower().replace("agent", "").strip()
+            if personality:
+                content_json["assigned_personality"] = personality
         user_content.messageContentJSON = json.dumps(content_json)
         
         logger.info(f"🔍 DEBUG: Sending message content to agent: '{message.content}'")
@@ -242,7 +246,21 @@ class AimpMessageClient:
                                 'http://vital.ai/ontology/vital-aimp#isDirectMessageResponse', False
                             ))
                         if 'AgentMessageContent' in component_type:
-                            agent_text = component.get('http://vital.ai/ontology/vital-aimp#hasText', '')
+                            mcj = component.get('http://vital.ai/ontology/vital-aimp#hasMessageContentJSON', '')
+                            if mcj:
+                                try:
+                                    mcj_data = json.loads(mcj) if isinstance(mcj, str) else mcj
+                                    logger.info(f"📨 AIMP: messageContentJSON: {mcj}")
+                                    # message_body may be at top level or nested inside
+                                    # a response wrapper (e.g. nurture_lead_response)
+                                    agent_text = mcj_data.get('message_body', '')
+                                    if not agent_text:
+                                        for val in mcj_data.values():
+                                            if isinstance(val, dict) and 'message_body' in val:
+                                                agent_text = val['message_body']
+                                                break
+                                except (json.JSONDecodeError, AttributeError) as e:
+                                    logger.warning(f"📨 AIMP: Failed to parse hasMessageContentJSON: {e}")
                 
                 if agent_text:
                     from vital_chatwoot_bridge.core.models import ResponseMode, AgentResponseMetadata

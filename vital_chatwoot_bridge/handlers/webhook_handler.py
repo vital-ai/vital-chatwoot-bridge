@@ -159,16 +159,29 @@ class WebhookHandler:
                 account_id = event_data.account.get("id")
                 conversation_id = event_data.conversation.get("id")
                 
+                channel = event_data.conversation.get("channel", "")
+                sender_email = event_data.sender.get("email")
+
                 delivered_count = 0
                 for response in responses:
                     if response.success and response.deliver_to_chatwoot:
-                        await self._post_response_to_chatwoot(
-                            account_id,
-                            conversation_id,
-                            response.content,
-                            private=False,
-                            inbox_id=inbox_id
-                        )
+                        if "Email" in channel and sender_email and inbox_mapping.from_email:
+                            await self._send_email_via_mailgun(
+                                account_id,
+                                conversation_id,
+                                response.content,
+                                recipient_email=sender_email,
+                                subject=subject,
+                                from_email=inbox_mapping.from_email,
+                            )
+                        else:
+                            await self._post_response_to_chatwoot(
+                                account_id,
+                                conversation_id,
+                                response.content,
+                                private=False,
+                                inbox_id=inbox_id
+                            )
                         delivered_count += 1
                     elif response.success:
                         logger.info(f"📨 Response received but not posted to Chatwoot (deliver_to_chatwoot=False)")
@@ -465,6 +478,72 @@ class WebhookHandler:
             logger.error(f"Error sending message to agent: {str(e)}")
             return []
     
+    async def _send_email_via_mailgun(
+        self,
+        account_id: int,
+        conversation_id: int,
+        content: str,
+        recipient_email: str,
+        subject: Optional[str] = None,
+        from_email: Optional[str] = None,
+    ):
+        """Send agent response via Mailgun and record as private note in Chatwoot."""
+        try:
+            from vital_chatwoot_bridge.integrations.mailgun_client import MailgunClient, MailgunClientError
+
+            if not self.settings.mailgun:
+                logger.error("❌ Mailgun not configured — cannot send email response")
+                return
+
+            # Wrap plain text in basic HTML
+            html_content = (
+                "<!DOCTYPE html>\n"
+                '<html lang="en">\n<head>\n'
+                '<meta charset="utf-8">\n'
+                '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
+                "</head>\n<body>\n"
+                f"<p>{content}</p>\n"
+                "</body>\n</html>"
+            )
+
+            reply_subject = f"Re: {subject}" if subject else "Reply from Cardiff"
+
+            mg_client = MailgunClient(self.settings.mailgun)
+            try:
+                mg_result = await mg_client.send_email(
+                    to=recipient_email,
+                    subject=reply_subject,
+                    html=html_content,
+                    from_email=from_email,
+                )
+            except MailgunClientError as mge:
+                logger.error(f"❌ Mailgun send failed for agent response: {mge}")
+                return
+            finally:
+                await mg_client.close()
+
+            mailgun_id = mg_result.get("id", "")
+            record_content = (
+                f"📧 **Email sent via Mailgun**\n\n"
+                f"**To:** {recipient_email}\n"
+                f"**Subject:** {reply_subject}\n"
+                f"**Mailgun ID:** {mailgun_id}\n\n"
+                f"---\n\n"
+                f"{content}"
+            )
+
+            await self.api_client.send_message(
+                account_id=account_id,
+                conversation_id=conversation_id,
+                content=record_content,
+                message_type="outgoing",
+                private=True,
+            )
+            logger.info(f"📧 Agent response sent via Mailgun to {recipient_email}, recorded in conversation {conversation_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to send email via Mailgun: {str(e)}", exc_info=True)
+
     async def _post_response_to_chatwoot(self, account_id: int, conversation_id: int, content: str, private: bool = False, inbox_id: str = None):
         """Post response back to Chatwoot."""
         try:
@@ -476,13 +555,30 @@ class WebhookHandler:
                     if shortener:
                         content = await shortener.shorten_urls_in_text(content)
 
-            await self.api_client.send_message(
-                account_id=account_id,
-                conversation_id=conversation_id,
-                content=content,
-                message_type="outgoing",
-                private=private
-            )
+            # SMS splitting: send long messages as ordered chunks with a
+            # delay so Twilio doesn't segment them (which causes out-of-
+            # order delivery at the carrier level).
+            if inbox_id and self.settings.is_sms_inbox(inbox_id):
+                from vital_chatwoot_bridge.utils.sms_splitter import split_sms_message, SMS_CHUNK_DELAY_SECONDS
+                chunks = split_sms_message(content)
+                for i, chunk in enumerate(chunks):
+                    if i > 0:
+                        await asyncio.sleep(SMS_CHUNK_DELAY_SECONDS)
+                    await self.api_client.send_message(
+                        account_id=account_id,
+                        conversation_id=conversation_id,
+                        content=chunk,
+                        message_type="outgoing",
+                        private=private,
+                    )
+            else:
+                await self.api_client.send_message(
+                    account_id=account_id,
+                    conversation_id=conversation_id,
+                    content=content,
+                    message_type="outgoing",
+                    private=private,
+                )
             logger.info(f"Posted response to Chatwoot conversation {conversation_id}")
         
         except Exception as e:

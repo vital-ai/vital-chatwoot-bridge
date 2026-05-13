@@ -20,6 +20,7 @@ class CommunicationMessage(BaseModel):
     channel: str  # "email", "sms", "imessage", "webchat"
     subject: Optional[str] = None  # email only
     sender: CommunicationSender
+    private: bool = False
     created_at: str  # ISO 8601
 
 
