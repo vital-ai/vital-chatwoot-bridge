@@ -555,30 +555,13 @@ class WebhookHandler:
                     if shortener:
                         content = await shortener.shorten_urls_in_text(content)
 
-            # SMS splitting: send long messages as ordered chunks with a
-            # delay so Twilio doesn't segment them (which causes out-of-
-            # order delivery at the carrier level).
-            if inbox_id and self.settings.is_sms_inbox(inbox_id):
-                from vital_chatwoot_bridge.utils.sms_splitter import split_sms_message, SMS_CHUNK_DELAY_SECONDS
-                chunks = split_sms_message(content)
-                for i, chunk in enumerate(chunks):
-                    if i > 0:
-                        await asyncio.sleep(SMS_CHUNK_DELAY_SECONDS)
-                    await self.api_client.send_message(
-                        account_id=account_id,
-                        conversation_id=conversation_id,
-                        content=chunk,
-                        message_type="outgoing",
-                        private=private,
-                    )
-            else:
-                await self.api_client.send_message(
-                    account_id=account_id,
-                    conversation_id=conversation_id,
-                    content=content,
-                    message_type="outgoing",
-                    private=private,
-                )
+            await self.api_client.send_message(
+                account_id=account_id,
+                conversation_id=conversation_id,
+                content=content,
+                message_type="outgoing",
+                private=private,
+            )
             logger.info(f"Posted response to Chatwoot conversation {conversation_id}")
         
         except Exception as e:

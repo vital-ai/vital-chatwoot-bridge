@@ -871,29 +871,9 @@ async def post_message(
         if body.attachments:
             attachments = await _resolve_attachments(body.attachments)
 
-        # SMS splitting: for SMS inboxes, send long messages as sequential
-        # chunks with a delay to prevent Twilio carrier-level reordering.
-        from vital_chatwoot_bridge.core.config import get_settings as _get_cfg
-        _cfg_sms = _get_cfg()
-        if (body.direction == "outbound"
-                and not body.suppress_delivery
-                and not attachments
-                and _cfg_sms.is_sms_inbox(str(inbox_id))):
-            from vital_chatwoot_bridge.utils.sms_splitter import split_sms_message, SMS_CHUNK_DELAY_SECONDS
-            chunks = split_sms_message(content)
-            results = []
-            for i, chunk in enumerate(chunks):
-                if i > 0:
-                    await asyncio.sleep(SMS_CHUNK_DELAY_SECONDS)
-                chunk_payload = dict(msg_payload, content=chunk)
-                results.append(
-                    await client.send_message_raw(account_id, conversation_id, chunk_payload)
-                )
-            result = results[-1]  # return last chunk's response
-        else:
-            result = await client.send_message_raw(
-                account_id, conversation_id, msg_payload, attachments=attachments
-            )
+        result = await client.send_message_raw(
+            account_id, conversation_id, msg_payload, attachments=attachments
+        )
 
         return SingleResponse(
             data={

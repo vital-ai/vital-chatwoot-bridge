@@ -157,9 +157,12 @@ class ChatwootAPIClient:
                 data: Dict[str, Any] = {
                     "content": content,
                     "message_type": message_type,
-                    "private": str(private).lower(),
                     "content_type": content_type,
                 }
+                # Only include private when true — Ruby treats any
+                # non-empty string (including "false") as truthy.
+                if private:
+                    data["private"] = "true"
                 if content_attributes:
                     data["content_attributes"] = json.dumps(content_attributes)
 
@@ -914,8 +917,11 @@ class ChatwootAPIClient:
             has_file_attachments = attachments and any(a.file_bytes for a in attachments)
 
             if has_file_attachments:
+                # Only include private when true — Ruby treats any
+                # non-empty string (including "false") as truthy.
+                clean = {k: v for k, v in data.items() if k != "private" or v in (True, "true")}
                 form_data = {k: (json.dumps(v) if isinstance(v, (dict, list)) else str(v))
-                             for k, v in data.items()}
+                             for k, v in clean.items()}
                 files = self._build_multipart_files(attachments)
                 headers = {k: v for k, v in self.client.headers.items()
                            if k.lower() != "content-type"}
