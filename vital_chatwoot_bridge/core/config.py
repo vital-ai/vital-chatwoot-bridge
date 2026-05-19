@@ -67,6 +67,24 @@ class APIInboxConfig(BaseModel):
     hmac_secret: Optional[str] = Field(None, description="HMAC secret for webhook verification")
 
 
+class MemoryDBConfig(BaseModel):
+    """AWS MemoryDB (Redis-compatible) cluster configuration."""
+    url: str = Field(..., description="MemoryDB connection URL (rediss://user:pass@host:port)")
+    ssl: bool = Field(default=True, description="Enable TLS (MemoryDB always requires TLS)")
+    ssl_cert_reqs: str = Field(default="none", description="SSL certificate verification mode")
+
+
+class DebounceConfig(BaseModel):
+    """Message debounce configuration."""
+    enabled: bool = Field(default=True, description="Enable message debouncing")
+    window_seconds: float = Field(default=3.0, description="Quiet window before draining")
+    max_window_seconds: float = Field(default=10.0, description="Hard cap on buffering time")
+    max_batch_size: int = Field(default=10, description="Maximum messages to batch")
+    dedup_ttl_seconds: int = Field(default=60, description="TTL for message ID deduplication")
+    drain_poll_interval: float = Field(default=1.0, description="Seconds between drain poll cycles")
+    sms_inbox_ids: List[str] = Field(default_factory=list, description="Inbox IDs to debounce (empty = all)")
+
+
 class URLShortenerConfig(BaseModel):
     """URL shortener configuration."""
     provider: str = Field(default="short_io", description="Shortener provider (short_io)")
@@ -196,6 +214,16 @@ class Config:
         # -- Google / Gmail (CW_BRIDGE__google__*) --
         self.google: Optional[GmailConfig] = self._parse_google(
             env_tree.get("google", {})
+        )
+
+        # -- MemoryDB (CW_BRIDGE__memorydb__*) --
+        self.memorydb: Optional[MemoryDBConfig] = self._parse_memorydb(
+            env_tree.get("memorydb", {})
+        )
+
+        # -- Debounce (CW_BRIDGE__debounce__*) --
+        self.debounce: Optional[DebounceConfig] = self._parse_debounce(
+            env_tree.get("debounce", {})
         )
 
         # -- URL Shortener (CW_BRIDGE__url_shortener__*) --
@@ -376,6 +404,50 @@ class Config:
             return config
         except Exception as e:
             logger.error(f"❌ CONFIG: Failed to parse Google config: {e}")
+            return None
+
+    @staticmethod
+    def _parse_memorydb(tree: Dict[str, Any]) -> Optional[MemoryDBConfig]:
+        """Build MemoryDBConfig from CW_BRIDGE__memorydb__* env vars."""
+        if not isinstance(tree, dict) or "url" not in tree:
+            return None
+        try:
+            prepared = dict(tree)
+            if "ssl" in prepared and isinstance(prepared["ssl"], str):
+                prepared["ssl"] = prepared["ssl"].lower() == "true"
+            config = MemoryDBConfig(**prepared)
+            logger.info(f"🗄️  CONFIG: MemoryDB configured — ssl={config.ssl}")
+            return config
+        except Exception as e:
+            logger.error(f"❌ CONFIG: Failed to parse MemoryDB config: {e}")
+            return None
+
+    @staticmethod
+    def _parse_debounce(tree: Dict[str, Any]) -> Optional[DebounceConfig]:
+        """Build DebounceConfig from CW_BRIDGE__debounce__* env vars."""
+        if not isinstance(tree, dict):
+            return None
+        try:
+            prepared = dict(tree)
+            if "enabled" in prepared and isinstance(prepared["enabled"], str):
+                prepared["enabled"] = prepared["enabled"].lower() == "true"
+            for float_field in ("window_seconds", "max_window_seconds", "drain_poll_interval"):
+                if float_field in prepared and isinstance(prepared[float_field], str):
+                    prepared["" + float_field] = float(prepared[float_field])
+            for int_field in ("max_batch_size", "dedup_ttl_seconds"):
+                if int_field in prepared and isinstance(prepared[int_field], str):
+                    prepared[int_field] = int(prepared[int_field])
+            if "sms_inbox_ids" in prepared and isinstance(prepared["sms_inbox_ids"], str):
+                prepared["sms_inbox_ids"] = [s.strip() for s in prepared["sms_inbox_ids"].split(",") if s.strip()]
+            config = DebounceConfig(**prepared)
+            logger.info(
+                f"⏱️  CONFIG: Debounce configured — enabled={config.enabled}, "
+                f"window={config.window_seconds}s, max_window={config.max_window_seconds}s, "
+                f"poll_interval={config.drain_poll_interval}s"
+            )
+            return config
+        except Exception as e:
+            logger.error(f"❌ CONFIG: Failed to parse debounce config: {e}")
             return None
 
     @staticmethod

@@ -35,6 +35,11 @@ class WebhookHandler:
         self.api_client = api_client
         self.settings = get_settings()
         self.api_inbox_service = APIInboxService()
+        self._debouncer = None
+
+    def set_debouncer(self, debouncer) -> None:
+        """Attach the message debouncer (called from lifespan after init)."""
+        self._debouncer = debouncer
     
     async def handle_webhook(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Handle incoming webhook from Chatwoot."""
@@ -120,7 +125,31 @@ class WebhookHandler:
             
             agent_config = inbox_mapping.agent_config
             logger.info(f"🎯 WEBHOOK: Selected agent '{agent_config.agent_id}' for inbox '{inbox_id}' ({inbox_mapping.inbox_name})")
-            
+
+            # --- Debounce path ---
+            if self._debouncer is not None:
+                result = await self._debouncer.handle_message(
+                    message_id=str(event_data.id),
+                    conversation_id=str(event_data.conversation.get("id")),
+                    content=event_data.content or "",
+                    inbox_id=inbox_id,
+                    full_payload={
+                        "event_data": event_data.model_dump(),
+                        "inbox_mapping_inbox_id": inbox_mapping.inbox_id,
+                    },
+                )
+                if result == "duplicate":
+                    return WebhookResponse(
+                        status="ignored",
+                        message="Duplicate message (dedup)"
+                    ).model_dump()
+                elif result == "buffered":
+                    return WebhookResponse(
+                        status="accepted",
+                        message="Message buffered for debounce"
+                    ).model_dump()
+                # result == "passthrough" — continue to immediate processing below
+
             # Extract email subject from content_attributes if present
             email_attrs = event_data.content_attributes.get("email", {})
             subject = email_attrs.get("subject") if isinstance(email_attrs, dict) else None
@@ -567,6 +596,99 @@ class WebhookHandler:
         except Exception as e:
             logger.error(f"Failed to post response to Chatwoot: {str(e)}")
     
+    async def handle_debounced_batch(
+        self, conversation_id: str, concatenated_content: str, meta: Dict[str, Any]
+    ) -> None:
+        """Called by the debouncer drain worker when a batch is ready.
+
+        Sends the concatenated content to the agent and posts the response
+        back to Chatwoot.
+        """
+        try:
+            last_payload = meta.get("last_message_payload", {})
+            event_dict = last_payload.get("event_data", {})
+            inbox_id = meta.get("inbox_id", "")
+
+            # Rebuild the inbox mapping from config
+            inbox_mapping = self.settings.get_inbox_mapping(inbox_id)
+            if not inbox_mapping:
+                logger.error(f"⏱️  DEBOUNCE-DRAIN: No agent mapping for inbox {inbox_id}")
+                return
+
+            agent_config = inbox_mapping.agent_config
+
+            # Extract context from the last message payload
+            conversation = event_dict.get("conversation", {})
+            sender = event_dict.get("sender", {})
+            content_attributes = event_dict.get("content_attributes", {})
+            account = event_dict.get("account", {})
+
+            email_attrs = content_attributes.get("email", {})
+            subject = email_attrs.get("subject") if isinstance(email_attrs, dict) else None
+
+            message_id = str(uuid.uuid4())
+            bridge_message = BridgeToAgentMessage(
+                message_id=message_id,
+                inbox_id=inbox_id,
+                inbox_name=inbox_mapping.inbox_name,
+                aimp_intent_type=inbox_mapping.aimp_intent_type,
+                conversation_id=conversation.get("id"),
+                content=concatenated_content,
+                subject=subject,
+                sender=MessageSender(
+                    id=str(sender.get("id", "unknown")),
+                    name=sender.get("name", "Unknown"),
+                    email=sender.get("email"),
+                    phone=sender.get("phone_number"),
+                    type=sender.get("type", "contact")
+                ),
+                context=MessageContext(
+                    channel=conversation.get("channel", "web_widget"),
+                    created_at=datetime.utcnow(),
+                    additional_attributes=conversation.get("additional_attributes", {})
+                ),
+                response_mode=ResponseMode.SYNC
+            )
+
+            logger.info(
+                f"⏱️  DEBOUNCE-DRAIN: Sending batched message to agent "
+                f"{agent_config.agent_id} for conv={conversation_id} "
+                f"({meta.get('message_count', '?')} msgs, {len(concatenated_content)} chars)"
+            )
+
+            responses = await self._send_message_to_agent(agent_config, bridge_message)
+
+            if responses:
+                account_id = account.get("id")
+                conv_id_int = conversation.get("id")
+                channel = conversation.get("channel", "")
+                sender_email = sender.get("email")
+
+                for response in responses:
+                    if response.success and response.deliver_to_chatwoot:
+                        if "Email" in channel and sender_email and inbox_mapping.from_email:
+                            await self._send_email_via_mailgun(
+                                account_id, conv_id_int, response.content,
+                                recipient_email=sender_email,
+                                subject=subject,
+                                from_email=inbox_mapping.from_email,
+                            )
+                        else:
+                            await self._post_response_to_chatwoot(
+                                account_id, conv_id_int, response.content,
+                                private=False, inbox_id=inbox_id
+                            )
+            else:
+                logger.warning(
+                    f"⏱️  DEBOUNCE-DRAIN: Agent returned no responses for conv={conversation_id}"
+                )
+
+        except Exception as e:
+            logger.error(
+                f"⏱️  DEBOUNCE-DRAIN: Error processing batch for conv={conversation_id}: {e}",
+                exc_info=True,
+            )
+
     def _normalize_message_type(self, message_type) -> str:
         """Convert integer message_type to string format."""
         if isinstance(message_type, int):

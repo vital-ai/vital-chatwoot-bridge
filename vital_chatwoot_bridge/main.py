@@ -95,6 +95,40 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"⚠️  Webhook worker pool init failed: {e}")
 
+        # Initialize MemoryDB + Debouncer (if configured)
+        debouncer = None
+        if settings.memorydb and settings.debounce and settings.debounce.enabled:
+            try:
+                from vital_chatwoot_bridge.services.redis_client import init_redis, get_redis
+                from vital_chatwoot_bridge.services.message_debouncer import MessageDebouncer
+
+                init_redis(settings.memorydb)
+                r = get_redis()
+                # Verify connectivity
+                await r.ping()
+                logger.info("🗄️  MemoryDB PING OK")
+
+                # Create the debouncer with a drain callback that invokes the webhook handler
+                async def _drain_callback(conv_id: str, content: str, meta: dict):
+                    await webhook_handler.handle_debounced_batch(conv_id, content, meta)
+
+                debouncer = MessageDebouncer(
+                    redis=r,
+                    config=settings.debounce,
+                    drain_callback=_drain_callback,
+                )
+                await debouncer.start()
+                webhook_handler.set_debouncer(debouncer)
+                logger.info("⏱️  Message debouncer initialized and started")
+            except Exception as e:
+                logger.warning(f"⚠️  MemoryDB/Debouncer init failed — debounce disabled: {e}")
+                debouncer = None
+        else:
+            if not settings.memorydb:
+                logger.info("⏱️  Debounce disabled: no MemoryDB configured")
+            elif not settings.debounce or not settings.debounce.enabled:
+                logger.info("⏱️  Debounce disabled by configuration")
+
         # Initialize email template renderer (if configured)
         if settings.email_templates:
             try:
@@ -114,6 +148,17 @@ async def lifespan(app: FastAPI):
         
     finally:
         logger.info("Shutting down Vital Chatwoot Bridge...")
+        
+        # Stop debouncer
+        if debouncer is not None:
+            await debouncer.stop()
+        
+        # Close Redis
+        try:
+            from vital_chatwoot_bridge.services.redis_client import close_redis
+            await close_redis()
+        except Exception:
+            pass
         
         # Stop webhook worker pool
         from vital_chatwoot_bridge.services.webhook_queue import get_worker_pool as _gwp

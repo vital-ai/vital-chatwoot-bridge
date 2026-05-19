@@ -30,28 +30,78 @@
         { "name": "CW_BRIDGE__websocket__ping_interval", "value": "30" },
         { "name": "CW_BRIDGE__websocket__ping_timeout", "value": "10" },
 
-        { "name": "CW_BRIDGE__inbox_agents__1__inbox_name", "value": "Cardiff Agent" },
+        { "name": "CW_BRIDGE__inbox_agents__1__inbox_name", "value": "Email Inbox" },
         { "name": "CW_BRIDGE__inbox_agents__1__agent_id", "value": "cardiff-sales-agent" },
         { "name": "CW_BRIDGE__inbox_agents__1__websocket_url", "value": "http://agents-internal.cardiffbank.co:6006" },
         { "name": "CW_BRIDGE__inbox_agents__1__timeout_seconds", "value": "30" },
         { "name": "CW_BRIDGE__inbox_agents__1__bot", "value": "default" },
 
+        { "name": "CW_BRIDGE__inbox_agents__2__inbox_name", "value": "SMS Inbox" },
+        { "name": "CW_BRIDGE__inbox_agents__2__aimp_intent_type", "value": "urn:cardiff_sales_agent_nurture_lead" },
+        { "name": "CW_BRIDGE__inbox_agents__2__agent_id", "value": "cardiff-sales-agent" },
+        { "name": "CW_BRIDGE__inbox_agents__2__websocket_url", "value": "http://agents-internal.cardiffbank.co:6006" },
+        { "name": "CW_BRIDGE__inbox_agents__2__timeout_seconds", "value": "30" },
+        { "name": "CW_BRIDGE__inbox_agents__2__bot", "value": "default" },
+
+        { "name": "CW_BRIDGE__inbox_agents__3__inbox_name", "value": "Internal Portal" },
+        { "name": "CW_BRIDGE__inbox_agents__3__agent_id", "value": "cardiff-underwriter-agent" },
+        { "name": "CW_BRIDGE__inbox_agents__3__websocket_url", "value": "http://agents-internal.cardiffbank.co:6007" },
+        { "name": "CW_BRIDGE__inbox_agents__3__timeout_seconds", "value": "45" },
+        { "name": "CW_BRIDGE__inbox_agents__3__bot", "value": "underwriter" },
+
+        { "name": "CW_BRIDGE__inbox_agents__4__inbox_name", "value": "Loop Message" },
+        { "name": "CW_BRIDGE__inbox_agents__4__agent_id", "value": "cardiff-sales-agent" },
+        { "name": "CW_BRIDGE__inbox_agents__4__websocket_url", "value": "http://agents-internal.cardiffbank.co:6006" },
+        { "name": "CW_BRIDGE__inbox_agents__4__timeout_seconds", "value": "30" },
+        { "name": "CW_BRIDGE__inbox_agents__4__bot", "value": "default" },
+
+        { "name": "CW_BRIDGE__inbox_agents__5__inbox_name", "value": "Attentive Production" },
+        { "name": "CW_BRIDGE__inbox_agents__5__agent_id", "value": "cardiff-sales-agent" },
+        { "name": "CW_BRIDGE__inbox_agents__5__websocket_url", "value": "http://agents-internal.cardiffbank.co:6006" },
+        { "name": "CW_BRIDGE__inbox_agents__5__timeout_seconds", "value": "30" },
+        { "name": "CW_BRIDGE__inbox_agents__5__bot", "value": "default" },
+
+        { "name": "CW_BRIDGE__inbox_agents__6__inbox_name", "value": "Loop Message Production" },
+        { "name": "CW_BRIDGE__inbox_agents__6__agent_id", "value": "cardiff-sales-agent" },
+        { "name": "CW_BRIDGE__inbox_agents__6__websocket_url", "value": "http://agents-internal.cardiffbank.co:6006" },
+        { "name": "CW_BRIDGE__inbox_agents__6__timeout_seconds", "value": "30" },
+        { "name": "CW_BRIDGE__inbox_agents__6__bot", "value": "default" },
+
+        { "name": "CW_BRIDGE__inbox_agents__7__inbox_name", "value": "Attentive Production" },
+        { "name": "CW_BRIDGE__inbox_agents__7__agent_id", "value": "cardiff-sales-agent" },
+        { "name": "CW_BRIDGE__inbox_agents__7__websocket_url", "value": "http://agents-internal.cardiffbank.co:6006" },
+        { "name": "CW_BRIDGE__inbox_agents__7__timeout_seconds", "value": "30" },
+        { "name": "CW_BRIDGE__inbox_agents__7__bot", "value": "default" },
+
+        { "name": "CW_BRIDGE__inbox_agents__8__inbox_name", "value": "Support Email" },
+        { "name": "CW_BRIDGE__inbox_agents__8__aimp_intent_type", "value": "urn:cardiff_sales_agent_nurture_lead" },
+        { "name": "CW_BRIDGE__inbox_agents__8__agent_id", "value": "cardiff-sales-agent" },
+        { "name": "CW_BRIDGE__inbox_agents__8__websocket_url", "value": "http://agents-internal.cardiffbank.co:6006" },
+        { "name": "CW_BRIDGE__inbox_agents__8__timeout_seconds", "value": "30" },
+        { "name": "CW_BRIDGE__inbox_agents__8__bot", "value": "default" },
+
+        { "name": "CW_BRIDGE__inbox_agents__10__inbox_name", "value": "Customer Portal" },
+        { "name": "CW_BRIDGE__inbox_agents__10__agent_id", "value": "cardiff-sales-agent" },
+        { "name": "CW_BRIDGE__inbox_agents__10__websocket_url", "value": "http://agents-internal.cardiffbank.co:6006" },
+        { "name": "CW_BRIDGE__inbox_agents__10__timeout_seconds", "value": "30" },
+        { "name": "CW_BRIDGE__inbox_agents__10__bot", "value": "default" },
+
         { "name": "CW_BRIDGE__inbox_agents__13__inbox_name", "value": "CarlyAgent" },
-        { "name": "CW_BRIDGE__inbox_agents__13__aimp_intent_type", "value": "urn:cardiff_sales_agent_app_completion" },
+        { "name": "CW_BRIDGE__inbox_agents__13__aimp_intent_type", "value": "urn:cardiff_sales_agent_nurture_lead" },
         { "name": "CW_BRIDGE__inbox_agents__13__agent_id", "value": "cardiff-sales-agent" },
         { "name": "CW_BRIDGE__inbox_agents__13__websocket_url", "value": "http://agents-internal.cardiffbank.co:6006" },
         { "name": "CW_BRIDGE__inbox_agents__13__timeout_seconds", "value": "30" },
         { "name": "CW_BRIDGE__inbox_agents__13__bot", "value": "default" },
 
         { "name": "CW_BRIDGE__inbox_agents__14__inbox_name", "value": "ReedAgent" },
-        { "name": "CW_BRIDGE__inbox_agents__14__aimp_intent_type", "value": "urn:cardiff_sales_agent_app_completion" },
+        { "name": "CW_BRIDGE__inbox_agents__14__aimp_intent_type", "value": "urn:cardiff_sales_agent_nurture_lead" },
         { "name": "CW_BRIDGE__inbox_agents__14__agent_id", "value": "cardiff-sales-agent" },
         { "name": "CW_BRIDGE__inbox_agents__14__websocket_url", "value": "http://agents-internal.cardiffbank.co:6006" },
         { "name": "CW_BRIDGE__inbox_agents__14__timeout_seconds", "value": "30" },
         { "name": "CW_BRIDGE__inbox_agents__14__bot", "value": "default" },
 
         { "name": "CW_BRIDGE__inbox_agents__15__inbox_name", "value": "MorganAgent" },
-        { "name": "CW_BRIDGE__inbox_agents__15__aimp_intent_type", "value": "urn:cardiff_sales_agent_app_completion" },
+        { "name": "CW_BRIDGE__inbox_agents__15__aimp_intent_type", "value": "urn:cardiff_sales_agent_nurture_lead" },
         { "name": "CW_BRIDGE__inbox_agents__15__agent_id", "value": "cardiff-sales-agent" },
         { "name": "CW_BRIDGE__inbox_agents__15__websocket_url", "value": "http://agents-internal.cardiffbank.co:6006" },
         { "name": "CW_BRIDGE__inbox_agents__15__timeout_seconds", "value": "30" },
@@ -100,9 +150,23 @@
         { "name": "CW_BRIDGE__url_shortener__domain", "value": "go.example.org" },
         { "name": "CW_BRIDGE__url_shortener__enabled", "value": "true" },
         { "name": "CW_BRIDGE__url_shortener__sms_only", "value": "true" },
-        { "name": "CW_BRIDGE__url_shortener__sms_inbox_ids", "value": "2" }
+        { "name": "CW_BRIDGE__url_shortener__sms_inbox_ids", "value": "2" },
+
+        { "name": "CW_BRIDGE__memorydb__ssl", "value": "true" },
+        { "name": "CW_BRIDGE__memorydb__ssl_cert_reqs", "value": "none" },
+
+        { "name": "CW_BRIDGE__debounce__enabled", "value": "true" },
+        { "name": "CW_BRIDGE__debounce__window_seconds", "value": "3.0" },
+        { "name": "CW_BRIDGE__debounce__max_window_seconds", "value": "10.0" },
+        { "name": "CW_BRIDGE__debounce__max_batch_size", "value": "10" },
+        { "name": "CW_BRIDGE__debounce__dedup_ttl_seconds", "value": "60" },
+        { "name": "CW_BRIDGE__debounce__drain_poll_interval", "value": "1.0" }
       ],
       "secrets": [
+        {
+          "name": "CW_BRIDGE__memorydb__url",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/memorydb-url-XXXXXX"
+        },
         {
           "name": "CW_BRIDGE__url_shortener__api_key",
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:vital-chatwoot-bridge/url-shortener-api-key-XXXXXX"
