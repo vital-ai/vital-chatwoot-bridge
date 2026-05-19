@@ -288,7 +288,6 @@ class ChatwootClientAPI:
         url = f"{self.base_url}/accounts/{self.settings.chatwoot_account_id}/conversations"
         
         payload = {
-            "source_id": f"contact_{contact_id}",
             "inbox_id": inbox_id,
             "contact_id": contact_id,
             "custom_attributes": custom_attributes or {}
