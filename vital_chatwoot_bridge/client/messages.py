@@ -64,6 +64,12 @@ class MessagesMixin:
         template_name: Optional[str] = None,
         template_vars: Optional[Dict[str, Any]] = None,
         from_email: Optional[str] = None,
+        gmail_sender: Optional[str] = None,
+        enable_open_tracking: bool = False,
+        enable_click_tracking: bool = False,
+        cta_url: Optional[str] = None,
+        campaign: Optional[str] = None,
+        lead_id: Optional[str] = None,
     ) -> SingleResponse:
         """
         Post a message (inbound or outbound) to any inbox.
@@ -93,6 +99,12 @@ class MessagesMixin:
             template_name: Jinja2 template name (required when content_mode='template')
             template_vars: Template variables (used when content_mode='template')
             from_email: Sender address override (Mailgun html/template modes only)
+            gmail_sender: Sender email for Gmail delivery (content_mode='gmail_template')
+            enable_open_tracking: Inject open-tracking pixel (gmail_template only)
+            enable_click_tracking: Wrap CTA with click-tracking redirect (gmail_template only)
+            cta_url: CTA destination URL (required when enable_click_tracking=True)
+            campaign: Campaign tag for tracking attribution
+            lead_id: Lead ID for tracking attribution
         """
         payload: Dict[str, Any] = {
             "direction": direction,
@@ -137,6 +149,18 @@ class MessagesMixin:
             payload["template_vars"] = template_vars
         if from_email:
             payload["from_email"] = from_email
+        if gmail_sender:
+            payload["gmail_sender"] = gmail_sender
+        if enable_open_tracking:
+            payload["enable_open_tracking"] = True
+        if enable_click_tracking:
+            payload["enable_click_tracking"] = True
+        if cta_url:
+            payload["cta_url"] = cta_url
+        if campaign:
+            payload["campaign"] = campaign
+        if lead_id:
+            payload["lead_id"] = lead_id
 
         data = await self.post("/api/v1/chatwoot/messages", json=payload)
         return SingleResponse(**data)
@@ -257,6 +281,59 @@ class MessagesMixin:
             template_vars=template_vars or {},
             cc_emails=cc,
             bcc_emails=bcc,
+        )
+
+    async def send_gmail_email(
+        self,
+        gmail_sender: str,
+        to: str,
+        inbox_id: int,
+        template_name: str,
+        template_vars: Optional[Dict[str, Any]] = None,
+        contact_name: Optional[str] = None,
+        enable_open_tracking: bool = False,
+        enable_click_tracking: bool = False,
+        cta_url: Optional[str] = None,
+        campaign: Optional[str] = None,
+        lead_id: Optional[str] = None,
+    ) -> SingleResponse:
+        """
+        Send an email via Gmail API using a rendered Jinja2 template.
+
+        Uses POST /messages with content_mode='gmail_template'. The server
+        renders the template, optionally injects tracking, sends via Gmail
+        API, and records in Chatwoot.
+
+        Args:
+            gmail_sender: Sender email (must be in allowed senders whitelist)
+            to: Recipient email address
+            inbox_id: Chatwoot inbox ID
+            template_name: Registered template name (configured via S3)
+            template_vars: Variables to pass to the Jinja template
+                (should include 'subject', 'recipient_name', 'sender_name', etc.)
+            contact_name: Display name for the contact
+            enable_open_tracking: Inject open-tracking pixel
+            enable_click_tracking: Wrap CTA link with click-tracking redirect
+            cta_url: CTA destination URL (required when enable_click_tracking=True)
+            campaign: Campaign tag for tracking attribution
+            lead_id: Lead ID for tracking attribution
+        """
+        return await self.post_message(
+            direction="outbound",
+            contact_identifier=to,
+            contact_email=to,
+            contact_name=contact_name,
+            message_content="",
+            inbox_id=inbox_id,
+            content_mode="gmail_template",
+            gmail_sender=gmail_sender,
+            template_name=template_name,
+            template_vars=template_vars or {},
+            enable_open_tracking=enable_open_tracking,
+            enable_click_tracking=enable_click_tracking,
+            cta_url=cta_url,
+            campaign=campaign,
+            lead_id=lead_id,
         )
 
     async def send_mailgun_email(
