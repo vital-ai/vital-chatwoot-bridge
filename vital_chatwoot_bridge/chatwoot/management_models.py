@@ -148,7 +148,8 @@ class PostMessageRequest(BaseModel):
             "'markdown' (markdown via Chatwoot), "
             "'html' (raw HTML sent via Mailgun, recorded in Chatwoot), "
             "'template' (Jinja template rendered + sent via Mailgun, recorded in Chatwoot), "
-            "'gmail_template' (Jinja template rendered + sent via Gmail API, recorded in Chatwoot)"
+            "'gmail_template' (Jinja template rendered + sent via Gmail API, recorded in Chatwoot), "
+            "'zoom_sms' (SMS sent via Zoom Phone API, recorded in Chatwoot as note)"
         ),
     )
     template_name: Optional[str] = Field(None, description="Jinja2 template name (required when content_mode='template' or 'gmail_template')")
@@ -177,4 +178,9 @@ class PostMessageRequest(BaseModel):
     lead_id: Optional[str] = Field(
         None,
         description="Lead ID for tracking attribution.",
+    )
+    # Zoom SMS fields (used when content_mode='zoom_sms')
+    zoom_account: Optional[str] = Field(
+        None,
+        description="Zoom account name (key in config). Required when content_mode='zoom_sms'.",
     )

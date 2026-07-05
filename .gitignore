@@ -226,3 +226,7 @@ tmp/
 temp/
 
 data
+
+# Zoom OAuth tokens (local test)
+zoom_token.json
+zoom_token.tmp

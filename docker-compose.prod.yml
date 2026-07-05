@@ -16,6 +16,16 @@ services:
       - CW_BRIDGE__app__debug=false
       - CW_BRIDGE__app__environment=production
       - CW_BRIDGE__app__log_format=json
+      # MemoryDB — set CW_BRIDGE__memorydb__url in .env or Secrets Manager
+      - CW_BRIDGE__memorydb__ssl=true
+      - CW_BRIDGE__memorydb__ssl_cert_reqs=none
+      # Debounce (requires MemoryDB)
+      - CW_BRIDGE__debounce__enabled=true
+      - CW_BRIDGE__debounce__window_seconds=3.0
+      - CW_BRIDGE__debounce__max_window_seconds=10.0
+      - CW_BRIDGE__debounce__max_batch_size=10
+      - CW_BRIDGE__debounce__dedup_ttl_seconds=60
+      - CW_BRIDGE__debounce__drain_poll_interval=1.0
     env_file:
       - .env
     restart: unless-stopped

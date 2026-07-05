@@ -18,6 +18,7 @@ from vital_chatwoot_bridge.chatwoot.client_models import (
 from vital_chatwoot_bridge.integrations.loopmessage_client import (
     create_loopmessage_client, LoopMessageClientError
 )
+from vital_chatwoot_bridge.services.message_webhook import fire_message_event
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +168,27 @@ class APIInboxService:
                 )
             
             logger.info(f"✅ Attentive webhook processed successfully: {event_type}")
+
+            # Fire message event webhook (R3: Attentive webhook inbound)
+            direction = "inbound" if sender_type == "customer" else "outbound"
+            await fire_message_event(
+                direction=direction,
+                channel=message_type,  # "sms" or "email"
+                delivery_method="chatwoot",
+                contact={
+                    "identifier": contact.identifier,
+                    "name": contact.name,
+                    "email": contact.email,
+                    "phone_number": contact.phone_number,
+                },
+                message={"content": message_content},
+                metadata={
+                    "source": "attentive_webhook",
+                    "sender_type": sender_type,
+                    "external_id": message_data.get("id"),
+                },
+            )
+
             return {
                 "status": "success",
                 "inbox_type": "attentive",

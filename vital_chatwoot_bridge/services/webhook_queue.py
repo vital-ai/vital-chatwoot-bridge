@@ -128,6 +128,158 @@ class RedisQueue:
 
 
 # ---------------------------------------------------------------------------
+# Rate limiter protocol + implementations
+# ---------------------------------------------------------------------------
+
+class RateLimiter(Protocol):
+    """Common interface for rate limiters (local or distributed)."""
+
+    @property
+    def rate(self) -> float:
+        ...
+
+    async def acquire(self) -> None:
+        ...
+
+
+class TokenBucket:
+    """In-process token-bucket rate limiter shared across workers.
+
+    Limits the aggregate throughput to *rate* items per second regardless of
+    how many workers are running concurrently.  **Per-process only** — use
+    DistributedTokenBucket for multi-instance coordination.
+    """
+
+    def __init__(self, rate: float, burst: int = 1):
+        """
+        Args:
+            rate: Sustained tokens per second (e.g., 1.5 = 1.5 items/sec).
+            burst: Maximum tokens that can accumulate (allows small bursts).
+        """
+        self._rate = rate
+        self._burst = burst
+        self._tokens = float(burst)
+        self._last_refill = time.monotonic()
+        self._lock = asyncio.Lock()
+
+    @property
+    def rate(self) -> float:
+        return self._rate
+
+    async def acquire(self) -> None:
+        """Wait until a token is available, then consume one."""
+        while True:
+            async with self._lock:
+                self._refill()
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+                # Calculate how long to wait for the next token
+                wait = (1.0 - self._tokens) / self._rate
+            await asyncio.sleep(wait)
+
+    def _refill(self) -> None:
+        now = time.monotonic()
+        elapsed = now - self._last_refill
+        self._tokens = min(self._burst, self._tokens + elapsed * self._rate)
+        self._last_refill = now
+
+
+# Lua script for atomic token-bucket operation in Redis.
+# KEYS[1] = bucket key
+# ARGV[1] = rate (tokens/sec), ARGV[2] = burst (max tokens), ARGV[3] = current time (float seconds)
+# Returns: wait time in seconds (0 = token granted immediately, >0 = must sleep this long)
+_REDIS_TOKEN_BUCKET_LUA = """
+local key = KEYS[1]
+local rate = tonumber(ARGV[1])
+local burst = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+
+local data = redis.call('HMGET', key, 'tokens', 'last_refill')
+local tokens = tonumber(data[1])
+local last_refill = tonumber(data[2])
+
+if tokens == nil then
+    -- First call: initialize bucket
+    tokens = burst
+    last_refill = now
+end
+
+-- Refill
+local elapsed = now - last_refill
+if elapsed > 0 then
+    tokens = math.min(burst, tokens + elapsed * rate)
+    last_refill = now
+end
+
+if tokens >= 1.0 then
+    tokens = tokens - 1.0
+    redis.call('HMSET', key, 'tokens', tostring(tokens), 'last_refill', tostring(last_refill))
+    redis.call('EXPIRE', key, 300)
+    return '0'
+else
+    -- Not enough tokens — report how long to wait
+    redis.call('HMSET', key, 'tokens', tostring(tokens), 'last_refill', tostring(last_refill))
+    redis.call('EXPIRE', key, 300)
+    local wait = (1.0 - tokens) / rate
+    return tostring(wait)
+end
+"""
+
+
+class DistributedTokenBucket:
+    """Redis-backed token bucket for global rate limiting across ECS tasks.
+
+    All instances sharing the same Redis key and bucket name will collectively
+    be limited to *rate* items per second.
+    """
+
+    def __init__(self, redis_client, rate: float, burst: int = 1, key: str = "cw_bridge:rate_limiter:attentive"):
+        """
+        Args:
+            redis_client: An async Redis client (RedisCluster or Redis).
+            rate: Sustained tokens per second across ALL instances.
+            burst: Maximum burst capacity.
+            key: Redis key for this bucket.
+        """
+        self._redis = redis_client
+        self._rate = rate
+        self._burst = burst
+        self._key = key
+        self._script_sha: Optional[str] = None
+
+    @property
+    def rate(self) -> float:
+        return self._rate
+
+    async def acquire(self) -> None:
+        """Wait until a token is available globally, then consume one."""
+        while True:
+            wait = await self._try_acquire()
+            if wait <= 0:
+                return
+            await asyncio.sleep(wait)
+
+    async def _try_acquire(self) -> float:
+        """Execute the Lua script and return wait time (0 = acquired)."""
+        now = time.time()  # wall-clock (consistent across instances)
+        try:
+            result = await self._redis.eval(
+                _REDIS_TOKEN_BUCKET_LUA,
+                1,
+                self._key,
+                str(self._rate),
+                str(self._burst),
+                str(now),
+            )
+            return float(result)
+        except Exception as exc:
+            # If Redis is unreachable, fall through (don't block forever)
+            logger.warning(f"⚠️  DistributedTokenBucket Redis error (allowing through): {exc}")
+            return 0.0
+
+
+# ---------------------------------------------------------------------------
 # Worker pool
 # ---------------------------------------------------------------------------
 
@@ -139,12 +291,17 @@ class WebhookWorkerPool:
         queue: WebhookQueue,
         handler: Callable[[dict], Awaitable[None]],
         num_workers: int = 3,
+        max_per_second: float = 0,
     ):
         self._queue = queue
         self._handler = handler
         self._num_workers = num_workers
         self._workers: List[asyncio.Task] = []
         self._running = False
+        # Rate limiter (0 = unlimited, set externally or created locally)
+        self._rate_limiter: Optional[RateLimiter] = None
+        if max_per_second > 0:
+            self._rate_limiter = TokenBucket(rate=max_per_second, burst=max(1, int(max_per_second)))
         # Counters
         self._total_enqueued = 0
         self._total_processed = 0
@@ -154,6 +311,13 @@ class WebhookWorkerPool:
     @property
     def queue(self) -> WebhookQueue:
         return self._queue
+
+    def set_rate_limiter(self, limiter: RateLimiter) -> None:
+        """Replace the rate limiter (e.g., swap local for distributed)."""
+        self._rate_limiter = limiter
+        logger.info(
+            f"🚦 Rate limiter set: {type(limiter).__name__} @ {limiter.rate}/sec"
+        )
 
     async def enqueue(self, item: dict) -> bool:
         """Enqueue an item and track the counter.  Returns False if full."""
@@ -190,6 +354,8 @@ class WebhookWorkerPool:
             "queue_backend": type(self._queue).__name__,
             "queue_depth": await self._queue.depth(),
             "num_workers": self._num_workers,
+            "max_per_second": self._rate_limiter.rate if self._rate_limiter else None,
+            "rate_limiter_type": type(self._rate_limiter).__name__ if self._rate_limiter else None,
             "total_enqueued": self._total_enqueued,
             "total_processed": self._total_processed,
             "total_errors": self._total_errors,
@@ -202,13 +368,17 @@ class WebhookWorkerPool:
     # ------------------------------------------------------------------
 
     async def _worker_loop(self, worker_id: int) -> None:
-        """Single worker: dequeue → process → repeat."""
+        """Single worker: dequeue → acquire token → process → repeat."""
         logger.info(f"Worker {worker_id} started")
         while self._running:
             try:
                 item = await self._queue.dequeue(timeout=2.0)
                 if item is None:
                     continue  # Timeout — loop back and check _running
+
+                # Throttle: wait for a token before processing
+                if self._rate_limiter:
+                    await self._rate_limiter.acquire()
 
                 try:
                     await self._handler(item)

@@ -17,6 +17,10 @@ from vital_chatwoot_bridge.email.models import (
     EmailTemplatesConfig, EmailTemplateDef, MailgunConfig,
     GmailConfig, GmailSender, GmailTrackingConfig,
 )
+from vital_chatwoot_bridge.zoom.models import (
+    ZoomConfig, ZoomOAuthConfig, ZoomAccount,
+    ZoomTokenStorageConfig, ZoomTokenRefreshConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +87,16 @@ class DebounceConfig(BaseModel):
     dedup_ttl_seconds: int = Field(default=60, description="TTL for message ID deduplication")
     drain_poll_interval: float = Field(default=1.0, description="Seconds between drain poll cycles")
     sms_inbox_ids: List[str] = Field(default_factory=list, description="Inbox IDs to debounce (empty = all)")
+
+
+class MessageWebhookConfig(BaseModel):
+    """Configuration for the general-purpose message event webhook."""
+    enabled: bool = Field(default=False, description="Enable message event webhooks")
+    url: str = Field(default="", description="Destination URL for message events")
+    secret: str = Field(default="", description="HMAC-SHA256 signing secret")
+    timeout_seconds: int = Field(default=10, description="HTTP timeout per attempt")
+    max_retries: int = Field(default=3, description="Retry count on failure")
+    retry_delay_seconds: int = Field(default=5, description="Base delay between retries")
 
 
 class URLShortenerConfig(BaseModel):
@@ -226,9 +240,19 @@ class Config:
             env_tree.get("debounce", {})
         )
 
+        # -- Message Webhook (CW_BRIDGE__message_webhook__*) --
+        self.message_webhook: Optional[MessageWebhookConfig] = self._parse_message_webhook(
+            env_tree.get("message_webhook", {})
+        )
+
         # -- URL Shortener (CW_BRIDGE__url_shortener__*) --
         self.url_shortener: Optional[URLShortenerConfig] = self._parse_url_shortener(
             env_tree.get("url_shortener", {})
+        )
+
+        # -- Zoom Phone SMS (CW_BRIDGE__zoom__*) --
+        self.zoom: Optional[ZoomConfig] = self._parse_zoom(
+            env_tree.get("zoom", {})
         )
 
         # -- Rate Limiting (CW_BRIDGE__rate_limiting__*) --
@@ -239,6 +263,7 @@ class Config:
         self.rl_max_chatwoot_concurrency = _get_int(rl, "max_chatwoot_concurrency", default=3)
         self.rl_attentive_workers = _get_int(rl, "attentive_workers", default=3)
         self.rl_attentive_queue_size = _get_int(rl, "attentive_queue_size", default=5000)
+        self.rl_attentive_max_per_second = _get_float(rl, "attentive_max_per_second", default=1.5)
         allowed_events_str = _get(rl, "attentive_allowed_events", default="sms.sent,sms.inbound_message")
         self.rl_attentive_allowed_events = [e.strip() for e in allowed_events_str.split(",") if e.strip()]
         self.rl_contact_cache_ttl = _get_int(rl, "contact_cache_ttl", default=300)
@@ -248,6 +273,7 @@ class Config:
             f"📋 CONFIG: Rate limiting — backend={self.rl_queue_backend}, "
             f"concurrency={self.rl_max_chatwoot_concurrency}, "
             f"workers={self.rl_attentive_workers}, "
+            f"max_per_second={self.rl_attentive_max_per_second}, "
             f"allowed_events={self.rl_attentive_allowed_events}"
         )
 
@@ -451,6 +477,28 @@ class Config:
             return None
 
     @staticmethod
+    def _parse_message_webhook(tree: Dict[str, Any]) -> Optional[MessageWebhookConfig]:
+        """Build MessageWebhookConfig from CW_BRIDGE__message_webhook__* env vars."""
+        if not isinstance(tree, dict) or "url" not in tree:
+            return None
+        try:
+            prepared = dict(tree)
+            if "enabled" in prepared and isinstance(prepared["enabled"], str):
+                prepared["enabled"] = prepared["enabled"].lower() == "true"
+            for int_field in ("timeout_seconds", "max_retries", "retry_delay_seconds"):
+                if int_field in prepared and isinstance(prepared[int_field], str):
+                    prepared[int_field] = int(prepared[int_field])
+            config = MessageWebhookConfig(**prepared)
+            logger.info(
+                f"📋 CONFIG: Message webhook configured — "
+                f"url={config.url}, enabled={config.enabled}"
+            )
+            return config
+        except Exception as e:
+            logger.error(f"❌ CONFIG: Failed to parse message webhook config: {e}")
+            return None
+
+    @staticmethod
     def _parse_url_shortener(tree: Dict[str, Any]) -> Optional[URLShortenerConfig]:
         """Build URLShortenerConfig from CW_BRIDGE__url_shortener__* env vars."""
         if not isinstance(tree, dict) or "api_key" not in tree:
@@ -472,6 +520,59 @@ class Config:
             return config
         except Exception as e:
             logger.error(f"❌ CONFIG: Failed to parse URL shortener config: {e}")
+            return None
+
+    @staticmethod
+    def _parse_zoom(zoom_tree: Dict[str, Any]) -> Optional[ZoomConfig]:
+        """Build ZoomConfig from CW_BRIDGE__zoom__* env vars."""
+        if not isinstance(zoom_tree, dict):
+            return None
+        # Require at minimum client_id to consider Zoom configured
+        oauth_tree = zoom_tree.get("oauth", {})
+        if not isinstance(oauth_tree, dict) or "client_id" not in oauth_tree:
+            return None
+        try:
+            oauth = ZoomOAuthConfig(
+                client_id=oauth_tree["client_id"],
+                client_secret=oauth_tree.get("client_secret", ""),
+                redirect_uri=oauth_tree.get("redirect_uri", ""),
+            )
+
+            accounts: Dict[str, ZoomAccount] = {}
+            for name, fields in zoom_tree.get("accounts", {}).items():
+                if isinstance(fields, dict):
+                    prepared = dict(fields)
+                    if "enabled" in prepared and isinstance(prepared["enabled"], str):
+                        prepared["enabled"] = prepared["enabled"].lower() == "true"
+                    accounts[name] = ZoomAccount(**prepared)
+
+            storage_tree = zoom_tree.get("token_storage", {})
+            token_storage = ZoomTokenStorageConfig(
+                backend=storage_tree.get("backend", "secrets_manager") if isinstance(storage_tree, dict) else "secrets_manager",
+                secret_prefix=storage_tree.get("secret_prefix", "vital-bridge/zoom-tokens/") if isinstance(storage_tree, dict) else "vital-bridge/zoom-tokens/",
+            )
+
+            refresh_tree = zoom_tree.get("token_refresh", {})
+            token_refresh = ZoomTokenRefreshConfig(
+                refresh_interval_minutes=int(refresh_tree.get("refresh_interval_minutes", 30)) if isinstance(refresh_tree, dict) else 30,
+                refresh_buffer_minutes=int(refresh_tree.get("refresh_buffer_minutes", 15)) if isinstance(refresh_tree, dict) else 15,
+                weekly_force_refresh=refresh_tree.get("weekly_force_refresh", "true").lower() == "true" if isinstance(refresh_tree, dict) else True,
+            )
+
+            config = ZoomConfig(
+                oauth=oauth,
+                accounts=accounts,
+                token_storage=token_storage,
+                token_refresh=token_refresh,
+            )
+            account_names = list(accounts.keys())
+            logger.info(
+                f"\U0001f4f1 CONFIG: Zoom Phone SMS configured \u2014 "
+                f"{len(accounts)} account(s): {account_names}"
+            )
+            return config
+        except Exception as e:
+            logger.error(f"\u274c CONFIG: Failed to parse Zoom config: {e}")
             return None
 
     # -------------------------------------------------------------------

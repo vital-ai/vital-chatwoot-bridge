@@ -14,6 +14,8 @@ from vital_chatwoot_bridge.chatwoot.client_models import (
     AttentiveWebhookRequest, AttentiveEmailReplyRequest
 )
 from vital_chatwoot_bridge.email.models import MailgunSendEmailRequest, GmailSendEmailRequest
+from vital_chatwoot_bridge.zoom.models import ZoomSmsSendRequest
+from vital_chatwoot_bridge.services.message_webhook import fire_message_event
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,24 @@ async def post_loopmessage_inbound(
         result = await service.process_loopmessage_inbound(request)
         
         logger.info(f"✅ LoopMessage inbound processed successfully")
+
+        # Fire message event webhook (R2: LoopMessage inbound)
+        await fire_message_event(
+            direction="inbound",
+            channel="imessage",
+            delivery_method="loopmessage",
+            contact={
+                "identifier": request.contact.phone_number,
+                "name": request.contact.name,
+                "phone_number": request.contact.phone_number,
+            },
+            message={"content": request.message_content},
+            metadata={
+                "source": "loopmessage_inbound",
+                "sender_type": "contact",
+            },
+        )
+
         return {
             "success": True,
             "message": "LoopMessage inbound processed successfully",
@@ -301,6 +321,25 @@ async def handle_attentive_email_reply(
         result = await service.process_attentive_email_reply(request)
         
         logger.info(f"✅ Attentive email reply processed successfully")
+
+        # Fire message event webhook (R4: Attentive email inbound)
+        await fire_message_event(
+            direction="inbound",
+            channel="email",
+            delivery_method="chatwoot",
+            contact={
+                "identifier": request.contact.email or request.from_email,
+                "name": request.contact.name,
+                "email": request.contact.email or request.from_email,
+                "phone_number": request.contact.phone_number,
+            },
+            message={"content": request.message_content, "subject": request.subject},
+            metadata={
+                "source": "attentive_email_inbound",
+                "sender_type": "contact",
+            },
+        )
+
         return {
             "success": True,
             "message": "Attentive email reply processed successfully",
@@ -537,6 +576,160 @@ async def post_gmail_email_send(
         raise HTTPException(status_code=500, detail={"success": False, "error": str(e)})
     finally:
         await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Zoom Phone SMS send
+# ---------------------------------------------------------------------------
+
+@api_inbox_router.post("/zoom/sms/send")
+async def post_zoom_sms_send(
+    request: ZoomSmsSendRequest,
+) -> Dict[str, Any]:
+    """
+    Send an SMS message via Zoom Phone.
+
+    Validates message length (max 500 chars), looks up the named account,
+    and sends via the Zoom Phone SMS API. Records result as a Chatwoot note
+    if the account has a default_inbox_id configured.
+
+    Requires CW_BRIDGE__zoom__* config to be set and the account to be authorized.
+    """
+    from vital_chatwoot_bridge.core.config import get_settings
+    from vital_chatwoot_bridge.integrations.zoom_sms_client import ZoomSmsClient, ZoomSmsError
+    from vital_chatwoot_bridge.zoom.oauth import ZoomOAuthManager
+    from vital_chatwoot_bridge.zoom.token_store import ZoomTokenStore
+
+    settings = get_settings()
+    if not settings.zoom:
+        raise HTTPException(status_code=501, detail="Zoom Phone SMS is not configured")
+
+    token_store = ZoomTokenStore(
+        settings.zoom.token_storage,
+        region=settings.aws_region,
+    )
+    oauth_manager = ZoomOAuthManager(settings.zoom, token_store)
+    client = ZoomSmsClient(settings.zoom, oauth_manager)
+
+    try:
+        result = await client.send_sms(
+            account_name=request.account,
+            to=request.to,
+            message=request.message,
+        )
+        return {
+            "success": True,
+            "message": "SMS sent via Zoom Phone",
+            "data": result.model_dump(),
+        }
+    except ZoomSmsError as e:
+        logger.error(f"❌ Zoom SMS send failed: {e}")
+        raise HTTPException(
+            status_code=e.status_code or 502,
+            detail={"success": False, "error": str(e), "response": e.response_data},
+        )
+    except Exception as e:
+        logger.error(f"❌ Unexpected error in Zoom SMS send: {e}")
+        raise HTTPException(status_code=500, detail={"success": False, "error": str(e)})
+    finally:
+        await client.close()
+        await oauth_manager.close()
+
+
+# ---------------------------------------------------------------------------
+# Zoom OAuth flow (one-time authorization)
+# ---------------------------------------------------------------------------
+
+@api_inbox_router.get("/zoom/oauth/authorize")
+async def get_zoom_oauth_authorize(
+    account: str,
+) -> Dict[str, Any]:
+    """
+    Generate the Zoom OAuth consent URL for initial account authorization.
+
+    Args:
+        account: Name of the Zoom account to authorize (must exist in config)
+
+    Returns:
+        JSON with the authorization URL to redirect the user to.
+    """
+    from vital_chatwoot_bridge.core.config import get_settings
+    from vital_chatwoot_bridge.zoom.oauth import ZoomOAuthManager
+    from vital_chatwoot_bridge.zoom.token_store import ZoomTokenStore
+
+    settings = get_settings()
+    if not settings.zoom:
+        raise HTTPException(status_code=501, detail="Zoom Phone SMS is not configured")
+
+    if account not in settings.zoom.accounts:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Zoom account '{account}' not found in configuration",
+        )
+
+    token_store = ZoomTokenStore(
+        settings.zoom.token_storage,
+        region=settings.aws_region,
+    )
+    oauth_manager = ZoomOAuthManager(settings.zoom, token_store)
+    authorize_url = oauth_manager.get_authorize_url(account)
+
+    return {
+        "success": True,
+        "account": account,
+        "authorize_url": authorize_url,
+        "instructions": "Open this URL in a browser to authorize Zoom Phone access.",
+    }
+
+
+@api_inbox_router.get("/zoom/oauth/callback")
+async def get_zoom_oauth_callback(
+    code: str,
+    state: str,
+) -> Dict[str, Any]:
+    """
+    OAuth callback handler — receives the authorization code from Zoom.
+
+    Zoom redirects here after the user grants consent. The `state` parameter
+    contains the account name, and `code` is exchanged for tokens.
+    """
+    from vital_chatwoot_bridge.core.config import get_settings
+    from vital_chatwoot_bridge.zoom.oauth import ZoomOAuthManager, ZoomOAuthError
+    from vital_chatwoot_bridge.zoom.token_store import ZoomTokenStore
+
+    settings = get_settings()
+    if not settings.zoom:
+        raise HTTPException(status_code=501, detail="Zoom Phone SMS is not configured")
+
+    account_name = state
+    if account_name not in settings.zoom.accounts:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid state: account '{account_name}' not in configuration",
+        )
+
+    token_store = ZoomTokenStore(
+        settings.zoom.token_storage,
+        region=settings.aws_region,
+    )
+    oauth_manager = ZoomOAuthManager(settings.zoom, token_store)
+
+    try:
+        token = await oauth_manager.exchange_code(code, account_name)
+        return {
+            "success": True,
+            "message": f"Zoom account '{account_name}' authorized successfully!",
+            "account": account_name,
+            "scope": token.scope,
+        }
+    except ZoomOAuthError as e:
+        logger.error(f"❌ Zoom OAuth callback failed: {e}")
+        raise HTTPException(
+            status_code=e.status_code or 502,
+            detail={"success": False, "error": str(e)},
+        )
+    finally:
+        await oauth_manager.close()
 
 
 # Note: Exception handlers are handled in individual endpoint try/catch blocks

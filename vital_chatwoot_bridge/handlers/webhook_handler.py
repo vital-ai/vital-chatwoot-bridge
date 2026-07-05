@@ -23,6 +23,7 @@ from vital_chatwoot_bridge.agents.models import AgentChatResponse
 from vital_chatwoot_bridge.chatwoot.api_client import ChatwootAPIClient
 from vital_chatwoot_bridge.services.api_inbox_service import APIInboxService
 from vital_chatwoot_bridge.chatwoot.client_models import LoopMessageOutboundRequest
+from vital_chatwoot_bridge.services.message_webhook import fire_message_event
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +154,31 @@ class WebhookHandler:
             # Extract email subject from content_attributes if present
             email_attrs = event_data.content_attributes.get("email", {})
             subject = email_attrs.get("subject") if isinstance(email_attrs, dict) else None
+
+            # Fire message event webhook (R1: Chatwoot inbound)
+            sender_phone = event_data.sender.get("phone_number")
+            sender_email_addr = event_data.sender.get("email")
+            channel = event_data.conversation.get("channel", "web_widget")
+            await fire_message_event(
+                direction="inbound",
+                channel=self._detect_channel(channel, inbox_id),
+                delivery_method="chatwoot",
+                contact={
+                    "identifier": sender_phone or sender_email_addr or str(event_data.sender.get("id", "")),
+                    "name": event_data.sender.get("name"),
+                    "email": sender_email_addr,
+                    "phone_number": sender_phone,
+                },
+                message={"content": event_data.content, "subject": subject},
+                metadata={
+                    "source": "chatwoot_webhook",
+                    "inbox_id": inbox_id,
+                    "inbox_name": inbox_mapping.inbox_name,
+                    "conversation_id": str(event_data.conversation.get("id", "")),
+                    "chatwoot_message_id": str(event_data.id),
+                    "sender_type": "contact",
+                },
+            )
 
             # Create bridge message
             message_id = str(uuid.uuid4())
@@ -425,6 +451,27 @@ class WebhookHandler:
             logger.info(f"🔍 DEBUG: LoopMessage API result: {result}")
             
             logger.info(f"✅ WEBHOOK: LoopMessage outbound processed successfully")
+
+            # Fire message event webhook (S7: LoopMessage outbound)
+            await fire_message_event(
+                direction="outbound",
+                channel="imessage",
+                delivery_method="loopmessage",
+                contact={"identifier": contact_phone, "phone_number": contact_phone},
+                message={"content": event_data.content},
+                metadata={
+                    "source": "loopmessage_outbound",
+                    "conversation_id": str(event_data.conversation.get("id", "")),
+                    "chatwoot_message_id": str(event_data.id),
+                    "sender_type": "agent",
+                    "agent_name": agent_name,
+                },
+                delivery={
+                    "status": "sent",
+                    "provider_id": result.get("loopmessage_result", {}).get("message_id"),
+                },
+            )
+
             return WebhookResponse(
                 status="processed",
                 message="LoopMessage outbound sent successfully",
@@ -570,6 +617,21 @@ class WebhookHandler:
             )
             logger.info(f"📧 Agent response sent via Mailgun to {recipient_email}, recorded in conversation {conversation_id}")
 
+            # Fire message event webhook (S6: agent auto-reply email)
+            await fire_message_event(
+                direction="outbound",
+                channel="email",
+                delivery_method="agent_reply",
+                contact={"identifier": recipient_email, "email": recipient_email},
+                message={"content": content, "subject": reply_subject},
+                metadata={
+                    "source": "agent_auto_reply_email",
+                    "conversation_id": str(conversation_id),
+                    "sender_type": "bot",
+                },
+                delivery={"status": "sent", "provider_id": mailgun_id},
+            )
+
         except Exception as e:
             logger.error(f"Failed to send email via Mailgun: {str(e)}", exc_info=True)
 
@@ -592,6 +654,21 @@ class WebhookHandler:
                 private=private,
             )
             logger.info(f"Posted response to Chatwoot conversation {conversation_id}")
+
+            # Fire message event webhook (S5: agent auto-reply via Chatwoot)
+            await fire_message_event(
+                direction="outbound",
+                channel=self._detect_channel_for_inbox(inbox_id),
+                delivery_method="agent_reply",
+                contact={},
+                message={"content": content},
+                metadata={
+                    "source": "agent_auto_reply",
+                    "inbox_id": inbox_id or "",
+                    "conversation_id": str(conversation_id),
+                    "sender_type": "bot",
+                },
+            )
         
         except Exception as e:
             logger.error(f"Failed to post response to Chatwoot: {str(e)}")
@@ -688,6 +765,36 @@ class WebhookHandler:
                 f"⏱️  DEBOUNCE-DRAIN: Error processing batch for conv={conversation_id}: {e}",
                 exc_info=True,
             )
+
+    def _detect_channel(self, chatwoot_channel: str, inbox_id: Optional[str] = None) -> str:
+        """Map Chatwoot channel string / inbox ID to normalized channel name."""
+        ch = (chatwoot_channel or "").lower()
+        if "email" in ch:
+            return "email"
+        if "sms" in ch or "twilio" in ch:
+            return "sms"
+        if inbox_id:
+            return self._detect_channel_for_inbox(inbox_id)
+        return "web"
+
+    def _detect_channel_for_inbox(self, inbox_id: Optional[str]) -> str:
+        """Best-effort channel detection from inbox ID alone."""
+        if not inbox_id:
+            return "web"
+        # Check if it's an SMS inbox via url_shortener config
+        if self.settings.is_sms_inbox(inbox_id):
+            return "sms"
+        # Check API inboxes
+        api_cfg = self.settings.get_api_inbox_by_chatwoot_id(inbox_id)
+        if api_cfg:
+            mtypes = api_cfg.message_types
+            if "imessage" in mtypes:
+                return "imessage"
+            if "sms" in mtypes:
+                return "sms"
+            if "email" in mtypes:
+                return "email"
+        return "web"
 
     def _normalize_message_type(self, message_type) -> str:
         """Convert integer message_type to string format."""

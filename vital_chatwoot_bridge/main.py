@@ -84,36 +84,66 @@ async def lifespan(app: FastAPI):
                 queue=queue,
                 handler=_attentive_queue_handler,
                 num_workers=settings.rl_attentive_workers,
+                max_per_second=settings.rl_attentive_max_per_second,
             )
             pool.start()
             set_worker_pool(pool)
             logger.info(
                 f"🚀 Webhook worker pool started — "
                 f"backend={settings.rl_queue_backend}, "
-                f"workers={settings.rl_attentive_workers}"
+                f"workers={settings.rl_attentive_workers}, "
+                f"max_per_second={settings.rl_attentive_max_per_second}"
             )
         except Exception as e:
             logger.warning(f"⚠️  Webhook worker pool init failed: {e}")
 
-        # Initialize MemoryDB + Debouncer (if configured)
-        debouncer = None
-        if settings.memorydb and settings.debounce and settings.debounce.enabled:
+        # Initialize MemoryDB (if configured) — used by rate limiter and debouncer
+        redis_client = None
+        if settings.memorydb:
             try:
                 from vital_chatwoot_bridge.services.redis_client import init_redis, get_redis
-                from vital_chatwoot_bridge.services.message_debouncer import MessageDebouncer
 
                 init_redis(settings.memorydb)
-                r = get_redis()
-                # Verify connectivity
-                await r.ping()
+                redis_client = get_redis()
+                await redis_client.ping()
                 logger.info("🗄️  MemoryDB PING OK")
+            except Exception as e:
+                logger.warning(f"⚠️  MemoryDB init failed: {e}")
+                redis_client = None
+
+        # Upgrade rate limiter to distributed (if MemoryDB available + pool exists)
+        if redis_client and settings.rl_attentive_max_per_second > 0:
+            try:
+                from vital_chatwoot_bridge.services.webhook_queue import (
+                    DistributedTokenBucket, get_worker_pool as _get_pool,
+                )
+                _pool = _get_pool()
+                if _pool:
+                    distributed_limiter = DistributedTokenBucket(
+                        redis_client=redis_client,
+                        rate=settings.rl_attentive_max_per_second,
+                        burst=max(1, int(settings.rl_attentive_max_per_second)),
+                    )
+                    _pool.set_rate_limiter(distributed_limiter)
+                    logger.info(
+                        f"🚦 Distributed rate limiter active — "
+                        f"{settings.rl_attentive_max_per_second}/sec across all ECS tasks"
+                    )
+            except Exception as e:
+                logger.warning(f"⚠️  Distributed rate limiter init failed (local fallback active): {e}")
+
+        # Initialize Debouncer (if configured + MemoryDB available)
+        debouncer = None
+        if redis_client and settings.debounce and settings.debounce.enabled:
+            try:
+                from vital_chatwoot_bridge.services.message_debouncer import MessageDebouncer
 
                 # Create the debouncer with a drain callback that invokes the webhook handler
                 async def _drain_callback(conv_id: str, content: str, meta: dict):
                     await webhook_handler.handle_debounced_batch(conv_id, content, meta)
 
                 debouncer = MessageDebouncer(
-                    redis=r,
+                    redis=redis_client,
                     config=settings.debounce,
                     drain_callback=_drain_callback,
                 )
@@ -121,13 +151,19 @@ async def lifespan(app: FastAPI):
                 webhook_handler.set_debouncer(debouncer)
                 logger.info("⏱️  Message debouncer initialized and started")
             except Exception as e:
-                logger.warning(f"⚠️  MemoryDB/Debouncer init failed — debounce disabled: {e}")
+                logger.warning(f"⚠️  Debouncer init failed — debounce disabled: {e}")
                 debouncer = None
         else:
             if not settings.memorydb:
                 logger.info("⏱️  Debounce disabled: no MemoryDB configured")
+            elif not redis_client:
+                logger.info("⏱️  Debounce disabled: MemoryDB connection failed")
             elif not settings.debounce or not settings.debounce.enabled:
                 logger.info("⏱️  Debounce disabled by configuration")
+
+        # Initialize message event webhook (if configured)
+        from vital_chatwoot_bridge.services.message_webhook import init_message_webhook
+        init_message_webhook(settings.message_webhook)
 
         # Initialize email template renderer (if configured)
         if settings.email_templates:
@@ -160,6 +196,12 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
         
+        # Close message webhook client
+        from vital_chatwoot_bridge.services.message_webhook import get_message_webhook as _gmw
+        _mw = _gmw()
+        if _mw is not None:
+            await _mw.close()
+
         # Stop webhook worker pool
         from vital_chatwoot_bridge.services.webhook_queue import get_worker_pool as _gwp
         _pool = _gwp()

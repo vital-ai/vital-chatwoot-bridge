@@ -31,6 +31,7 @@ from vital_chatwoot_bridge.chatwoot.communication_models import (
     CommunicationContact, CommunicationSummary, CommunicationsResponse,
 )
 from vital_chatwoot_bridge.services.inbox_cache import get_inbox_cache
+from vital_chatwoot_bridge.services.message_webhook import fire_message_event
 
 logger = logging.getLogger(__name__)
 
@@ -484,7 +485,7 @@ async def post_message(
         )
 
     # Validate content_mode
-    valid_modes = ("text", "markdown", "html", "template", "gmail_template")
+    valid_modes = ("text", "markdown", "html", "template", "gmail_template", "zoom_sms")
     if body.content_mode not in valid_modes:
         detail = f"content_mode must be one of {valid_modes}"
         logger.warning(f"POST /messages 422: {detail} (got '{body.content_mode}')")
@@ -540,6 +541,25 @@ async def post_message(
             raise HTTPException(
                 status_code=status.HTTP_501_NOT_IMPLEMENTED,
                 detail="Click tracking requested but tracking.click_url is not configured",
+            )
+
+    if body.content_mode == "zoom_sms":
+        from vital_chatwoot_bridge.core.config import get_settings as _get_settings
+        _settings = _get_settings()
+        if not _settings.zoom:
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail="Zoom Phone SMS is not configured; zoom_sms content_mode requires Zoom config",
+            )
+        if not body.zoom_account:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="zoom_account is required when content_mode='zoom_sms'",
+            )
+        if body.zoom_account not in _settings.zoom.accounts:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Zoom account '{body.zoom_account}' not found in configuration",
             )
 
     # suppress_delivery only valid for outbound
@@ -674,6 +694,27 @@ async def post_message(
                 account_id, conversation_id, record_payload
             )
 
+            # Fire message event webhook (S3: Mailgun outbound)
+            await fire_message_event(
+                direction="outbound",
+                channel="email",
+                delivery_method="mailgun",
+                contact={
+                    "identifier": recipient_email,
+                    "name": body.contact.name,
+                    "email": recipient_email,
+                    "phone_number": body.contact.phone_number,
+                },
+                message={"content": body.message.content, "subject": subject, "content_mode": body.content_mode},
+                metadata={
+                    "source": "management_api",
+                    "inbox_id": str(inbox_id),
+                    "conversation_id": str(conversation_id),
+                    "sender_type": "agent",
+                },
+                delivery={"status": "sent", "provider_id": mailgun_id},
+            )
+
             return SingleResponse(
                 data={
                     "contact_id": contact_id,
@@ -800,6 +841,28 @@ async def post_message(
                 account_id, conversation_id, record_payload
             )
 
+            # Fire message event webhook (S2: Gmail outbound)
+            await fire_message_event(
+                direction="outbound",
+                channel="email",
+                delivery_method="gmail",
+                contact={
+                    "identifier": recipient_email,
+                    "name": body.contact.name,
+                    "email": recipient_email,
+                    "phone_number": body.contact.phone_number,
+                },
+                message={"content": body.message.content, "subject": subject, "content_mode": "gmail_template"},
+                metadata={
+                    "source": "management_api",
+                    "inbox_id": str(inbox_id),
+                    "conversation_id": str(conversation_id),
+                    "sender_type": "agent",
+                    "agent_name": body.gmail_sender,
+                },
+                delivery={"status": "sent", "provider_id": gmail_id},
+            )
+
             return SingleResponse(
                 data={
                     "contact_id": contact_id,
@@ -807,6 +870,100 @@ async def post_message(
                     "message": result,
                     "gmail": gmail_result,
                     "tracking_msg_id": tracking_msg_id,
+                }
+            )
+
+        # -----------------------------------------------------------------
+        # Step 3d: zoom_sms → send via Zoom Phone, record in Chatwoot
+        # -----------------------------------------------------------------
+        if body.content_mode == "zoom_sms":
+            from vital_chatwoot_bridge.core.config import get_settings as _gs
+            from vital_chatwoot_bridge.integrations.zoom_sms_client import ZoomSmsClient, ZoomSmsError
+            from vital_chatwoot_bridge.zoom.oauth import ZoomOAuthManager
+            from vital_chatwoot_bridge.zoom.token_store import ZoomTokenStore
+
+            _cfg = _gs()
+            recipient_phone = body.contact.phone_number or body.contact.identifier
+            if not recipient_phone:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="contact.phone_number or contact.identifier is required for zoom_sms",
+                )
+
+            token_store = ZoomTokenStore(
+                _cfg.zoom.token_storage,
+                region=_cfg.aws_region,
+            )
+            oauth_manager = ZoomOAuthManager(_cfg.zoom, token_store)
+            zoom_client = ZoomSmsClient(_cfg.zoom, oauth_manager)
+
+            try:
+                zoom_result = await zoom_client.send_sms(
+                    account_name=body.zoom_account,
+                    to=recipient_phone,
+                    message=body.message.content,
+                )
+            except ZoomSmsError as ze:
+                logger.error(f"❌ Zoom SMS send failed in POST /messages: {ze}")
+                raise HTTPException(
+                    status_code=ze.status_code or 502,
+                    detail=f"Zoom SMS send failed: {ze}",
+                )
+            finally:
+                await zoom_client.close()
+                await oauth_manager.close()
+
+            # Record in Chatwoot as private outgoing note
+            zoom_account = _cfg.zoom.accounts[body.zoom_account]
+            record_content = (
+                f"\U0001f4f1 **SMS sent via Zoom Phone**\n\n"
+                f"**From:** {zoom_account.phone_number} ({zoom_account.display_name})\n"
+                f"**To:** {recipient_phone}\n"
+                f"**Message ID:** {zoom_result.message_id}\n\n"
+                f"---\n\n"
+                f"{body.message.content}"
+            )
+            record_payload = {
+                "content": record_content,
+                "message_type": "outgoing",
+                "private": True,
+                "content_attributes": {
+                    "zoom_sms_sent": True,
+                    "zoom_message_id": zoom_result.message_id,
+                    "zoom_session_id": zoom_result.session_id,
+                },
+            }
+
+            result = await client.send_message_raw(
+                account_id, conversation_id, record_payload
+            )
+
+            # Fire message event webhook (S4: Zoom SMS outbound)
+            await fire_message_event(
+                direction="outbound",
+                channel="sms",
+                delivery_method="zoom_sms",
+                contact={
+                    "identifier": recipient_phone,
+                    "name": body.contact.name,
+                    "phone_number": recipient_phone,
+                },
+                message={"content": body.message.content},
+                metadata={
+                    "source": "management_api",
+                    "inbox_id": str(inbox_id),
+                    "conversation_id": str(conversation_id),
+                    "sender_type": "agent",
+                },
+                delivery={"status": "sent", "provider_id": zoom_result.message_id},
+            )
+
+            return SingleResponse(
+                data={
+                    "contact_id": contact_id,
+                    "conversation_id": conversation_id,
+                    "message": result,
+                    "zoom_sms": zoom_result.model_dump(),
                 }
             )
 
@@ -873,6 +1030,31 @@ async def post_message(
 
         result = await client.send_message_raw(
             account_id, conversation_id, msg_payload, attachments=attachments
+        )
+
+        # Fire message event webhook (S1/R5: text/markdown via Chatwoot)
+        _suppressed = body.suppress_delivery
+        await fire_message_event(
+            direction=body.direction,
+            channel="web",
+            delivery_method="chatwoot",
+            contact={
+                "identifier": body.contact.identifier,
+                "name": body.contact.name,
+                "email": body.contact.email,
+                "phone_number": body.contact.phone_number,
+            },
+            message={"content": content, "content_mode": body.content_mode},
+            metadata={
+                "source": "management_api",
+                "inbox_id": str(inbox_id),
+                "conversation_id": str(conversation_id),
+                "sender_type": "agent" if body.direction == "outbound" else "contact",
+            },
+            delivery={
+                "status": "suppressed" if _suppressed else ("sent" if body.direction == "outbound" else "received"),
+                "suppressed": _suppressed,
+            },
         )
 
         return SingleResponse(
