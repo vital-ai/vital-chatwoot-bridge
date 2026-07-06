@@ -83,6 +83,21 @@ async def fire_message_event(
     webhook = get_message_webhook()
     if webhook is None:
         return
+
+    # Enrich metadata with from_phone/from_email from inbox config
+    inbox_id = metadata.get("inbox_id")
+    if inbox_id:
+        try:
+            from vital_chatwoot_bridge.core.config import get_settings
+            mapping = get_settings().get_inbox_mapping(str(inbox_id))
+            if mapping:
+                if mapping.from_phone and "from_phone" not in metadata:
+                    metadata["from_phone"] = mapping.from_phone
+                if mapping.from_email and "from_email" not in metadata:
+                    metadata["from_email"] = mapping.from_email
+        except Exception:
+            pass  # Don't block webhook on config lookup failure
+
     payload = build_message_event(
         direction=direction,
         channel=channel,

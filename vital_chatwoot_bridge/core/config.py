@@ -53,6 +53,7 @@ class InboxMapping(BaseModel):
         description="AIMP intent type URI sent to the agent for this inbox",
     )
     from_email: Optional[str] = Field(default=None, description="Mailgun sender address for this inbox (e.g. carly@mg.cardiff.co)")
+    from_phone: Optional[str] = Field(default=None, description="Twilio sender phone number in E.164 format (e.g. +18887894154)")
     agent_config: AgentConfig = Field(..., description="AI agent configuration")
 
 
@@ -308,12 +309,14 @@ class Config:
                 inbox_name = agent_fields.pop("inbox_name", "")
                 aimp_intent_type = agent_fields.pop("aimp_intent_type", "http://vital.ai/ontology/vital-aimp#AIMPIntentType_CHAT")
                 from_email = agent_fields.pop("from_email", None)
+                from_phone = agent_fields.pop("from_phone", None)
                 agent_config = AgentConfig(**agent_fields)
                 mappings.append(InboxMapping(
                     inbox_id=inbox_id,
                     inbox_name=inbox_name,
                     aimp_intent_type=aimp_intent_type,
                     from_email=from_email,
+                    from_phone=from_phone,
                     agent_config=agent_config,
                 ))
                 logger.info(f"📋 CONFIG: Loaded inbox agent mapping: inbox {inbox_id} → {agent_config.agent_id}")
