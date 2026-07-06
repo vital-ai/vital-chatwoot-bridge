@@ -727,6 +727,31 @@ class WebhookHandler:
                 response_mode=ResponseMode.SYNC
             )
 
+            # Fire inbound message event webhook (R1: debounced inbound)
+            sender_phone = sender.get("phone_number")
+            sender_email_addr = sender.get("email")
+            await fire_message_event(
+                direction="inbound",
+                channel=self._detect_channel_for_inbox(inbox_id),
+                delivery_method="chatwoot",
+                contact={
+                    "identifier": sender_phone or sender_email_addr or str(sender.get("id", "")),
+                    "name": sender.get("name"),
+                    "email": sender_email_addr,
+                    "phone_number": sender_phone,
+                },
+                message={"content": concatenated_content, "subject": subject},
+                metadata={
+                    "source": "chatwoot_webhook",
+                    "inbox_id": inbox_id,
+                    "inbox_name": inbox_mapping.inbox_name,
+                    "conversation_id": str(conversation_id),
+                    "message_count": meta.get("message_count", 1),
+                    "sender_type": "contact",
+                    "debounced": True,
+                },
+            )
+
             logger.info(
                 f"⏱️  DEBOUNCE-DRAIN: Sending batched message to agent "
                 f"{agent_config.agent_id} for conv={conversation_id} "
@@ -781,6 +806,13 @@ class WebhookHandler:
         """Best-effort channel detection from inbox ID alone."""
         if not inbox_id:
             return "web"
+        # Check inbox mapping for from_phone / from_email
+        mapping = self.settings.get_inbox_mapping(str(inbox_id))
+        if mapping:
+            if mapping.from_phone:
+                return "sms"
+            if mapping.from_email:
+                return "email"
         # Check if it's an SMS inbox via url_shortener config
         if self.settings.is_sms_inbox(inbox_id):
             return "sms"
