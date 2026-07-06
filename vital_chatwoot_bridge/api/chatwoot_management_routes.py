@@ -1034,9 +1034,10 @@ async def post_message(
 
         # Fire message event webhook (S1/R5: text/markdown via Chatwoot)
         _suppressed = body.suppress_delivery
+        _channel = "sms" if get_settings().is_sms_inbox(str(inbox_id)) else "web"
         await fire_message_event(
             direction=body.direction,
-            channel="web",
+            channel=_channel,
             delivery_method="chatwoot",
             contact={
                 "identifier": body.contact.identifier,
