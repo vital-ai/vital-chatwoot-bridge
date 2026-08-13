@@ -567,9 +567,10 @@ class ChatwootAPIClient:
         Uses POST /api/v1/accounts/{account_id}/contacts/filter with an
         ``equal_to`` operator, which resolves via an indexed equality:
         contacts(phone_number, account_id) or contacts(account_id, email).
-        The /contacts/search?q= endpoint is a fuzzy ILIKE across five columns
-        and sequentially scans the whole contacts table — prefer this whenever
-        the exact value is known.
+        The /contacts/search?q= endpoint ORs five ILIKE predicates — name,
+        email, phone_number, identifier, and the jsonb key
+        additional_attributes->>'company_name' — and can sequentially scan the
+        whole contacts table. Prefer this whenever the exact value is known.
 
         NOTE: Chatwoot's Contacts::FilterService prepends "+" to phone_number
         values itself, so the leading "+" must be stripped or the lookup

@@ -225,9 +225,11 @@ class ChatwootClientAPI:
 
         For phone numbers this uses POST /contacts/filter with ``equal_to``,
         which hits the index on contacts(phone_number, account_id).  The
-        /contacts/search?q= fallback is a fuzzy ILIKE over five columns and
-        sequentially scans the entire contacts table, so it is reserved for
-        email/identifier lookups that have no equivalent exact-match filter.
+        /contacts/search?q= fallback ORs five ILIKE predicates — name, email,
+        phone_number, identifier, and the jsonb key
+        additional_attributes->>'company_name' — and can sequentially scan the
+        entire contacts table, so it is reserved for identifier lookups that
+        have no safe exact-match filter.
         """
         account_id = self.settings.chatwoot_account_id
         filter_url = f"{self.base_url}/accounts/{account_id}/contacts/filter"

@@ -1621,7 +1621,7 @@ async def list_inboxes(
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
-def _normalize_phone(raw: str) -> str:
+def _normalize_phone(raw: str, require_explicit_prefix: bool = False) -> str:
     """Return E.164 phone string (+<digits>) or empty string if not a phone.
 
     Accepts display formats — "(843) 518-3122", "812-820-9091", "843.518.3122"
@@ -1630,10 +1630,17 @@ def _normalize_phone(raw: str) -> str:
     anything not normalized here can never match an exact lookup and falls back
     to the fuzzy ILIKE search (or returns 404).
 
-    A bare 10-digit number is assumed to be NANP and gets a "+1" prefix.  That
-    is a US/Canada assumption: a 10-digit international number would be
-    misprefixed, but the previous behaviour ("+<10 digits>") could not match
-    any stored E.164 number either, so this strictly widens what resolves.
+    A bare 10-digit number is assumed to be NANP and gets a "+1" prefix.  For a
+    value the caller actually called a phone number, that only widens what
+    resolves — the previous "+<10 digits>" output matched no stored E.164 number
+    either.
+
+    ``require_explicit_prefix=True`` disables every inference except an explicit
+    "+" country code.  Use it for values that are NOT declared phone numbers —
+    notably ``identifier``, which in production is usually a sequential internal
+    ID.  Guessing there is unsafe in a way it is not for a phone field: "+1" on
+    a bare 10-digit ID produces a structurally valid US number, so an exact
+    filter could resolve to a real but unrelated person's contact.
     """
     if not raw:
         return ""
@@ -1645,6 +1652,9 @@ def _normalize_phone(raw: str) -> str:
     # Explicit international prefix — trust the caller's country code.
     if raw.lstrip().startswith("+"):
         return f"+{digits}" if 8 <= len(digits) <= 15 else ""
+
+    if require_explicit_prefix:
+        return ""
 
     if len(digits) == 10:                      # NANP without country code
         return f"+1{digits}"
@@ -1666,10 +1676,14 @@ async def _resolve_contact(client, account_id: int, inbox_id: int, contact_info)
     """
     from vital_chatwoot_bridge.chatwoot.contact_cache import get_contact_cache
 
-    # Auto-infer phone_number from identifier when caller omits it
+    # Auto-infer phone_number from identifier when caller omits it. Only an
+    # explicit "+" counts here: identifiers are frequently sequential internal
+    # IDs (production has 891 contacts with a bare 10-digit identifier and no
+    # phone), and inferring "+1" from one would build a structurally valid US
+    # number that an exact filter could resolve to an unrelated person.
     phone = contact_info.phone_number
     if not phone and contact_info.identifier:
-        inferred = _normalize_phone(contact_info.identifier)
+        inferred = _normalize_phone(contact_info.identifier, require_explicit_prefix=True)
         if inferred:
             phone = inferred
             logger.info(f"Auto-inferred phone_number={phone} from identifier={contact_info.identifier!r}")
@@ -1691,10 +1705,10 @@ async def _resolve_contact_uncached(
     search_key = phone or contact_info.email or contact_info.identifier
     if search_key:
         try:
-            # Indexed equality lookups — /contacts/search?q= is a fuzzy ILIKE
-            # that sequentially scans the whole contacts table.  Identifier has
-            # no safe exact-match filter (FilterService downcases the value),
-            # so it stays on search.
+            # Indexed equality lookups — /contacts/search?q= ORs five fuzzy
+            # ILIKE predicates and can sequentially scan the whole contacts
+            # table.  Identifier has no safe exact-match filter (FilterService
+            # downcases the value), so it stays on search.
             if phone:
                 search_data = await client.filter_contacts_by_phone(account_id, phone)
             elif contact_info.email:
