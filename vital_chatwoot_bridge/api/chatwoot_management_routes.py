@@ -1122,6 +1122,17 @@ async def account_summary(
 MAX_CONVERSATIONS = 20
 MAX_MESSAGES_PER_CONVERSATION = 50
 
+# Chatwoot serves at most 20 messages per call regardless of the cap we apply
+# locally, and paginates backwards through the `before` cursor. Measured against
+# production: a 1,018-message conversation returns 20 in one call, 80 over four
+# pages. A local cap alone can therefore never see older messages — for a date
+# window we must page until the window is covered.
+CHATWOOT_MESSAGE_PAGE_SIZE = 20
+# Safety bound on backward paging per conversation. A wide window over a busy
+# conversation would otherwise issue an unbounded number of calls; when this
+# binds the result is reported as truncated rather than presented as complete.
+MAX_MESSAGE_PAGES = 10
+
 
 def _to_datetime(value: Any) -> Optional[datetime]:
     """Parse a Chatwoot timestamp (ISO 8601 string or epoch seconds) to UTC."""
@@ -1352,29 +1363,75 @@ async def get_communications(
         async def _fetch_messages(conv: Dict) -> Tuple[List[Dict], bool]:
             """Return (messages, truncated) for one conversation.
 
-            The date window is applied BEFORE the cap.  Capping first meant a
-            conversation with more than MAX_MESSAGES_PER_CONVERSATION messages
-            newer than `until` returned zero messages instead of the older ones
-            the caller asked for.
+            Chatwoot serves 20 messages per call, newest first, and pages
+            backwards via the `before` cursor. When a date window is requested
+            we follow that cursor until the window is covered — otherwise the
+            older messages the caller asked for are never fetched, and filtering
+            locally can only ever narrow the newest 20.
+
+            Without a window we keep the original single-call behaviour, since
+            paging every conversation to fill the local cap would triple the
+            request count on the common path for data nobody asked for.
+
+            The date filter is applied BEFORE the local cap either way: capping
+            first meant a conversation whose newest messages all post-date
+            `until` returned nothing instead of the older ones in range.
             """
             cid = int(conv["id"])
+            windowed = bool(since_dt or until_dt)
+            collected: List[Dict] = []
+            seen: set = set()
+            before: Optional[int] = None
+            truncated = False
+
             try:
-                data = await client.get_conversation_messages_raw(account_id, cid)
-                msgs = data.get("payload", [])
-                if since_dt or until_dt:
-                    msgs = [m for m in msgs if _message_in_window(m, since_dt, until_dt)]
-                # Sort newest first, then cap
-                msgs.sort(
-                    key=lambda m: m.get("created_at") or 0,
-                    reverse=True,
-                )
-                if len(msgs) > MAX_MESSAGES_PER_CONVERSATION:
+                for page in range(MAX_MESSAGE_PAGES if windowed else 1):
+                    data = await client.get_conversation_messages_raw(
+                        account_id, cid, before=before
+                    )
+                    batch = data.get("payload", [])
+                    fresh = [m for m in batch if m.get("id") not in seen]
+                    if not fresh:
+                        break
+                    seen.update(m.get("id") for m in fresh)
+
+                    collected.extend(
+                        m for m in fresh
+                        if not windowed or _message_in_window(m, since_dt, until_dt)
+                    )
+
+                    if not windowed:
+                        # A full page means Chatwoot may be holding more.
+                        truncated = len(batch) >= CHATWOOT_MESSAGE_PAGE_SIZE
+                        break
+
+                    oldest = min(
+                        (d for d in (_to_datetime(_parse_message_created_at(m)) for m in fresh)
+                         if d is not None),
+                        default=None,
+                    )
+                    if since_dt and oldest and oldest < since_dt:
+                        break          # paged past the start of the window
+                    if len(batch) < CHATWOOT_MESSAGE_PAGE_SIZE:
+                        break          # start of the conversation reached
+
+                    before = min(m["id"] for m in fresh if m.get("id") is not None)
+                else:
+                    # Loop exhausted its page budget with more history available.
+                    truncated = True
                     logger.warning(
-                        f"Communications: conversation {cid} matched {len(msgs)} messages, "
+                        f"Communications: conversation {cid} hit the {MAX_MESSAGE_PAGES}-page "
+                        f"fetch bound; older messages in range were not retrieved"
+                    )
+
+                collected.sort(key=lambda m: m.get("created_at") or 0, reverse=True)
+                if len(collected) > MAX_MESSAGES_PER_CONVERSATION:
+                    logger.warning(
+                        f"Communications: conversation {cid} matched {len(collected)} messages, "
                         f"returning newest {MAX_MESSAGES_PER_CONVERSATION}"
                     )
-                    return msgs[:MAX_MESSAGES_PER_CONVERSATION], True
-                return msgs, False
+                    return collected[:MAX_MESSAGES_PER_CONVERSATION], True
+                return collected, truncated
             except ChatwootAPIError:
                 logger.warning(f"Failed to fetch messages for conversation {cid}")
                 return [], False

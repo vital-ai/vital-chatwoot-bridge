@@ -32,9 +32,10 @@ class CommunicationConversation(BaseModel):
     status: str  # "open", "resolved", "pending"
     created_at: str
     messages: List[CommunicationMessage]
-    # True when this conversation held more matching messages than the per
-    # conversation cap. Without it a truncated result is indistinguishable
-    # from a complete one.
+    # True when messages were omitted — either more matched than the local cap
+    # allows, or the upstream fetch stopped before exhausting the conversation
+    # (Chatwoot serves 20 per page; see MAX_MESSAGE_PAGES). Without it a
+    # truncated result is indistinguishable from a complete one.
     messages_truncated: bool = False
 
 
