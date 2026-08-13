@@ -155,6 +155,41 @@ class ChatwootClientAPI:
 
         return await cache.get_or_create(cache_key, _do_create_or_get)
 
+    async def _lookup_contact(
+        self,
+        contact: ChatwootContact,
+    ) -> Optional[httpx.Response]:
+        """Look up an existing contact, preferring the indexed path.
+
+        For phone numbers this uses POST /contacts/filter with ``equal_to``,
+        which hits the index on contacts(phone_number, account_id).  The
+        /contacts/search?q= fallback is a fuzzy ILIKE over five columns and
+        sequentially scans the entire contacts table, so it is reserved for
+        email/identifier lookups that have no equivalent exact-match filter.
+        """
+        account_id = self.settings.chatwoot_account_id
+
+        if contact.phone_number:
+            # Chatwoot's FilterService prepends "+" itself — strip ours or the
+            # lookup searches for "++1555…" and silently matches nothing.
+            filter_url = f"{self.base_url}/accounts/{account_id}/contacts/filter"
+            payload = [{
+                "attribute_key": "phone_number",
+                "filter_operator": "equal_to",
+                "values": [contact.phone_number.lstrip("+")],
+                "query_operator": None,
+            }]
+            logger.info(f"Filtering for existing contact: {contact.phone_number}")
+            return await self._request("POST", filter_url, json={"payload": payload})
+
+        query = contact.email or contact.identifier
+        if not query:
+            return None
+
+        search_url = f"{self.base_url}/accounts/{account_id}/contacts/search"
+        logger.info(f"Searching for existing contact: {query}")
+        return await self._request("GET", search_url, params={"q": query})
+
     async def _create_or_get_contact_uncached(
         self,
         inbox_id: int,
@@ -162,17 +197,13 @@ class ChatwootClientAPI:
     ) -> ChatwootContactResponse:
         """Actual contact search/create logic (called through the cache)."""
         try:
-            # First, search for existing contact
-            search_url = f"{self.base_url}/accounts/{self.settings.chatwoot_account_id}/contacts/search"
-            search_params = {"q": contact.phone_number or contact.email or contact.identifier}
-            
-            logger.info(f"Searching for existing contact: {search_params['q']}")
-            search_response = await self._request("GET", search_url, params=search_params)
-            
-            if search_response.status_code == 200:
+            # First, look up an existing contact
+            search_response = await self._lookup_contact(contact)
+
+            if search_response is not None and search_response.status_code == 200:
                 search_data = search_response.json()
                 contacts = search_data.get('payload', [])
-                
+
                 # Look for exact match
                 for existing_contact in contacts:
                     if (existing_contact.get('phone_number') == contact.phone_number or
@@ -210,9 +241,9 @@ class ChatwootClientAPI:
                     f"Contact already exists (422), re-searching: "
                     f"{contact.phone_number or contact.email or contact.identifier}"
                 )
-                # Re-search — the contact exists but we lost the race
-                retry_resp = await self._request("GET", search_url, params=search_params)
-                if retry_resp.status_code == 200:
+                # Re-look-up — the contact exists but we lost the race
+                retry_resp = await self._lookup_contact(contact)
+                if retry_resp is not None and retry_resp.status_code == 200:
                     for existing_contact in retry_resp.json().get('payload', []):
                         if (existing_contact.get('phone_number') == contact.phone_number or
                             existing_contact.get('email') == contact.email or

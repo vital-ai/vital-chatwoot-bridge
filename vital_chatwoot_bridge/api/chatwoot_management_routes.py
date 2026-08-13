@@ -1625,7 +1625,12 @@ async def _resolve_contact(client, account_id: int, inbox_id: int, contact_info)
     search_key = phone or contact_info.email or contact_info.identifier
     if search_key:
         try:
-            search_data = await client.search_contacts(account_id, q=search_key)
+            if phone:
+                # Indexed equality lookup — /contacts/search?q= is a fuzzy ILIKE
+                # that sequentially scans the whole contacts table.
+                search_data = await client.filter_contacts_by_phone(account_id, phone)
+            else:
+                search_data = await client.search_contacts(account_id, q=search_key)
             contacts = search_data.get("payload", [])
             for c in contacts:
                 if (c.get("phone_number") == phone or

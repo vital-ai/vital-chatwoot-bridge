@@ -555,6 +555,48 @@ class ChatwootAPIClient:
         except Exception as e:
             raise ChatwootAPIError(f"Error searching contacts: {e}")
 
+    async def filter_contacts_by_phone(
+        self,
+        account_id: int,
+        phone_number: str,
+        page: int = 1
+    ) -> Dict[str, Any]:
+        """Find contacts by exact phone number. Returns raw API response dict.
+
+        Uses POST /api/v1/accounts/{account_id}/contacts/filter with an
+        ``equal_to`` operator, which resolves via the indexed equality on
+        contacts(phone_number, account_id).  The /contacts/search?q= endpoint
+        is a fuzzy ILIKE across five columns and sequentially scans the whole
+        contacts table — prefer this for E.164 lookups.
+
+        NOTE: Chatwoot's Contacts::FilterService prepends "+" to phone_number
+        values itself, so the leading "+" must be stripped here or the lookup
+        searches for "++1555…" and silently matches nothing.
+        """
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/contacts/filter"
+        payload = [{
+            "attribute_key": "phone_number",
+            "filter_operator": "equal_to",
+            "values": [phone_number.lstrip("+")],
+            "query_operator": None,
+        }]
+        try:
+            response = await self.client.post(
+                url, json={"payload": payload}, params={"page": page}
+            )
+            if response.status_code == 200:
+                return response.json()
+            body = response.text[:500]
+            raise ChatwootAPIError(
+                f"Failed to filter contacts: HTTP {response.status_code}: {body}",
+                status_code=response.status_code,
+                response_data=self._safe_json(response)
+            )
+        except ChatwootAPIError:
+            raise
+        except Exception as e:
+            raise ChatwootAPIError(f"Error filtering contacts: {e}")
+
     async def get_contact(
         self,
         account_id: int,
