@@ -7,6 +7,7 @@ import asyncio
 import io
 import json
 import logging
+import random
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 
@@ -21,6 +22,56 @@ from vital_chatwoot_bridge.chatwoot.client_models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Ceiling on retry backoff. A server-supplied Retry-After is honoured up to this
+# point; beyond it the request fails fast rather than holding a worker and a
+# semaphore slot hostage.
+_MAX_RETRY_DELAY = 30.0
+
+# Losing a contact-create race is normal under concurrency; the winner's row may
+# not be visible to our connection on the very next read.
+_DUPLICATE_LOOKUP_ATTEMPTS = 3
+_DUPLICATE_LOOKUP_DELAY = 0.25
+
+
+def _equal_to(attribute_key: str, value: str) -> List[Dict[str, Any]]:
+    """Build a Contacts::FilterService payload for an exact-match lookup."""
+    return [{
+        "attribute_key": attribute_key,
+        "filter_operator": "equal_to",
+        "values": [value],
+        "query_operator": None,
+    }]
+
+
+def _match_contact(payload: List[Dict[str, Any]], contact: ChatwootContact) -> Optional[Dict[str, Any]]:
+    """Return the first candidate matching a populated identifying field.
+
+    Each comparison requires the field to be non-empty on BOTH sides. Comparing
+    directly would let ``None == None`` match — so a contact with no email would
+    match any candidate that also lacks one, returning an unrelated person. The
+    exact-match filter lookups return only true matches, but the identifier
+    fallback still goes through the fuzzy search, where this matters.
+    """
+    for candidate in payload:
+        for field, wanted in (
+            ("phone_number", contact.phone_number),
+            ("email", contact.email),
+            ("identifier", contact.identifier),
+        ):
+            if wanted and candidate.get(field) == wanted:
+                return candidate
+    return None
+
+
+def _to_contact_response(candidate: Dict[str, Any]) -> ChatwootContactResponse:
+    """Build a response from a Chatwoot contact payload (id doubles as source_id)."""
+    return ChatwootContactResponse(
+        id=candidate['id'],
+        source_id=str(candidate['id']),
+        name=candidate.get('name'),
+        email=candidate.get('email'),
+    )
 
 
 class ChatwootClientAPIError(Exception):
@@ -84,7 +135,13 @@ class ChatwootClientAPI:
         """Execute an HTTP request through the global semaphore with retry.
 
         Retries on 429 (rate-limited) and 503 (unavailable) with exponential
-        backoff.  Other 5xx errors get a single retry.
+        backoff and jitter.  Other 5xx errors get a single retry.
+
+        A retry re-issues the identical request, so on an expensive endpoint it
+        multiplies load on the thing that is already struggling.  Two guards:
+        jitter decorrelates retries so N tasks that were 429'd together do not
+        all return at the same instant, and the delay is capped so a large
+        Retry-After cannot park a worker indefinitely.
         """
         sem = _get_semaphore()
         max_attempts = self.settings.rl_retry_max_attempts
@@ -118,6 +175,11 @@ class ChatwootClientAPI:
                     break  # Only one retry for generic 5xx
 
             if attempt < max_attempts:
+                # Equal jitter: half the delay fixed, half random. Without this,
+                # every task 429'd in the same instant retries in the same
+                # instant, reproducing the burst that caused the 429.
+                delay = min(delay, _MAX_RETRY_DELAY)
+                delay = delay / 2 + random.uniform(0, delay / 2)
                 logger.warning(
                     f"🚦 Chatwoot API {status} on {method} {url} — "
                     f"retry {attempt}/{max_attempts} after {delay:.1f}s"
@@ -168,21 +230,28 @@ class ChatwootClientAPI:
         email/identifier lookups that have no equivalent exact-match filter.
         """
         account_id = self.settings.chatwoot_account_id
+        filter_url = f"{self.base_url}/accounts/{account_id}/contacts/filter"
 
         if contact.phone_number:
             # Chatwoot's FilterService prepends "+" itself — strip ours or the
             # lookup searches for "++1555…" and silently matches nothing.
-            filter_url = f"{self.base_url}/accounts/{account_id}/contacts/filter"
-            payload = [{
-                "attribute_key": "phone_number",
-                "filter_operator": "equal_to",
-                "values": [contact.phone_number.lstrip("+")],
-                "query_operator": None,
-            }]
             logger.info(f"Filtering for existing contact: {contact.phone_number}")
-            return await self._request("POST", filter_url, json={"payload": payload})
+            return await self._request(
+                "POST", filter_url,
+                json={"payload": _equal_to("phone_number", contact.phone_number.lstrip("+"))},
+            )
 
-        query = contact.email or contact.identifier
+        if contact.email:
+            # FilterService downcases the value and Chatwoot stores emails
+            # downcased, so this matches regardless of input casing.
+            logger.info(f"Filtering for existing contact: {contact.email}")
+            return await self._request(
+                "POST", filter_url, json={"payload": _equal_to("email", contact.email)}
+            )
+
+        # Identifier has no safe exact-match filter — FilterService downcases
+        # the value, and identifiers are not normalized on write.
+        query = contact.identifier
         if not query:
             return None
 
@@ -201,21 +270,10 @@ class ChatwootClientAPI:
             search_response = await self._lookup_contact(contact)
 
             if search_response is not None and search_response.status_code == 200:
-                search_data = search_response.json()
-                contacts = search_data.get('payload', [])
-
-                # Look for exact match
-                for existing_contact in contacts:
-                    if (existing_contact.get('phone_number') == contact.phone_number or
-                        existing_contact.get('email') == contact.email or
-                        existing_contact.get('identifier') == contact.identifier):
-                        logger.info(f"Found existing contact: {existing_contact['id']}")
-                        return ChatwootContactResponse(
-                            id=existing_contact['id'],
-                            source_id=str(existing_contact['id']),  # Use contact_id as source_id for Main API
-                            name=existing_contact.get('name'),
-                            email=existing_contact.get('email')
-                        )
+                matched = _match_contact(search_response.json().get('payload', []), contact)
+                if matched:
+                    logger.info(f"Found existing contact: {matched['id']}")
+                    return _to_contact_response(matched)
             
             # Create new contact if not found
             create_url = f"{self.base_url}/accounts/{self.settings.chatwoot_account_id}/contacts"
@@ -237,25 +295,32 @@ class ChatwootClientAPI:
             # Handle 422 (duplicate contact) gracefully
             # ----------------------------------------------------------
             if create_response.status_code == 422:
-                logger.warning(
-                    f"Contact already exists (422), re-searching: "
-                    f"{contact.phone_number or contact.email or contact.identifier}"
-                )
-                # Re-look-up — the contact exists but we lost the race
-                retry_resp = await self._lookup_contact(contact)
-                if retry_resp is not None and retry_resp.status_code == 200:
-                    for existing_contact in retry_resp.json().get('payload', []):
-                        if (existing_contact.get('phone_number') == contact.phone_number or
-                            existing_contact.get('email') == contact.email or
-                            existing_contact.get('identifier') == contact.identifier):
-                            logger.info(f"Found contact on re-search after 422: {existing_contact['id']}")
-                            return ChatwootContactResponse(
-                                id=existing_contact['id'],
-                                source_id=str(existing_contact['id']),
-                                name=existing_contact.get('name'),
-                                email=existing_contact.get('email')
+                identity = contact.phone_number or contact.email or contact.identifier
+                logger.warning(f"Contact already exists (422), re-looking up: {identity}")
+
+                # We lost a create race against another worker or task. The
+                # winner's row exists, but a single immediate re-lookup can miss
+                # it if the commit is not yet visible to our connection — so
+                # retry briefly rather than failing the whole message. Race
+                # frequency scales with task count, so this path is routine.
+                for attempt in range(1, _DUPLICATE_LOOKUP_ATTEMPTS + 1):
+                    retry_resp = await self._lookup_contact(contact)
+                    if retry_resp is not None and retry_resp.status_code == 200:
+                        matched = _match_contact(retry_resp.json().get('payload', []), contact)
+                        if matched:
+                            logger.info(
+                                f"Found contact on re-lookup after 422 "
+                                f"(attempt {attempt}): {matched['id']}"
                             )
-                # If re-search also fails, raise
+                            return _to_contact_response(matched)
+                    if attempt < _DUPLICATE_LOOKUP_ATTEMPTS:
+                        await asyncio.sleep(_DUPLICATE_LOOKUP_DELAY * attempt)
+
+                logger.error(
+                    f"Contact 422 (duplicate) but re-lookup found nothing after "
+                    f"{_DUPLICATE_LOOKUP_ATTEMPTS} attempts: {identity}"
+                )
+                # If re-lookup also fails, raise
                 raise ChatwootClientAPIError(
                     "Contact 422 (duplicate) but re-search found nothing",
                     status_code=422,

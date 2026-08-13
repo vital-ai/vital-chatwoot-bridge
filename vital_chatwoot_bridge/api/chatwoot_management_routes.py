@@ -1158,11 +1158,24 @@ async def _resolve_contact_by_query(
     return the first exact match. Raises HTTPException on failure.
     """
     candidates: List[Dict[str, Any]] = []
-    search_terms = [t for t in (email, phone) if t]
 
-    for term in search_terms:
+    # Prefer indexed equality lookups; fall back to the fuzzy ILIKE search only
+    # for a phone we cannot normalize to E.164.
+    normalized_phone = _normalize_phone(phone) if phone else ""
+    lookups: List[tuple] = []
+    if email:
+        lookups.append(("email", email))
+    if normalized_phone:
+        lookups.append(("phone_number", normalized_phone))
+    elif phone:
+        lookups.append(("search", phone))
+
+    for attribute_key, term in lookups:
         try:
-            data = await client.search_contacts(account_id, q=term)
+            if attribute_key == "search":
+                data = await client.search_contacts(account_id, q=term)
+            else:
+                data = await client.filter_contacts(account_id, attribute_key, term)
             for c in data.get("payload", []):
                 if c.get("id") not in [x.get("id") for x in candidates]:
                     candidates.append(c)
@@ -1175,12 +1188,16 @@ async def _resolve_contact_by_query(
             detail="Contact not found",
         )
 
-    # Score candidates: +1 for each field match
+    # Score candidates: +1 for each field match.  Compare against the
+    # normalized phone — stored numbers are always E.164, so a display-format
+    # `phone` would score 0 and 404 even when the contact was found.
+    match_phone = normalized_phone or phone
+
     def _score(c: Dict) -> int:
         s = 0
         if email and (c.get("email") or "").lower() == email.lower():
             s += 1
-        if phone and c.get("phone_number") == phone:
+        if match_phone and c.get("phone_number") == match_phone:
             s += 1
         return s
 
@@ -1605,15 +1622,50 @@ async def list_inboxes(
 # ── Helpers ──────────────────────────────────────────────────────────
 
 def _normalize_phone(raw: str) -> str:
-    """Return E.164 phone string (+<digits>) or empty string if not a phone."""
-    digits = raw.lstrip("+")
-    if digits.isdigit() and len(digits) >= 10:
+    """Return E.164 phone string (+<digits>) or empty string if not a phone.
+
+    Accepts display formats — "(843) 518-3122", "812-820-9091", "843.518.3122"
+    — because callers pass human-entered numbers.  Chatwoot validates
+    phone_number as E.164 on write, so every stored number is "+<digits>";
+    anything not normalized here can never match an exact lookup and falls back
+    to the fuzzy ILIKE search (or returns 404).
+
+    A bare 10-digit number is assumed to be NANP and gets a "+1" prefix.  That
+    is a US/Canada assumption: a 10-digit international number would be
+    misprefixed, but the previous behaviour ("+<10 digits>") could not match
+    any stored E.164 number either, so this strictly widens what resolves.
+    """
+    if not raw:
+        return ""
+
+    digits = re.sub(r"\D", "", raw)
+    if not digits:
+        return ""
+
+    # Explicit international prefix — trust the caller's country code.
+    if raw.lstrip().startswith("+"):
+        return f"+{digits}" if 8 <= len(digits) <= 15 else ""
+
+    if len(digits) == 10:                      # NANP without country code
+        return f"+1{digits}"
+    if len(digits) == 11 and digits.startswith("1"):
+        return f"+{digits}"
+    if 11 <= len(digits) <= 15:                # already includes a country code
         return f"+{digits}"
     return ""
 
 
 async def _resolve_contact(client, account_id: int, inbox_id: int, contact_info) -> dict:
-    """Find existing contact or create a new one."""
+    """Find existing contact or create a new one, via the shared contact cache.
+
+    Uses the same process-wide ContactCache as client_api rather than a second
+    cache, so both paths coalesce concurrent lookups for the same contact and
+    share a single TTL. Keys are namespaced: this path caches raw Chatwoot
+    payload dicts while client_api caches ChatwootContactResponse objects, and
+    an unprefixed key would let one path receive the other's type.
+    """
+    from vital_chatwoot_bridge.chatwoot.contact_cache import get_contact_cache
+
     # Auto-infer phone_number from identifier when caller omits it
     phone = contact_info.phone_number
     if not phone and contact_info.identifier:
@@ -1622,22 +1674,43 @@ async def _resolve_contact(client, account_id: int, inbox_id: int, contact_info)
             phone = inferred
             logger.info(f"Auto-inferred phone_number={phone} from identifier={contact_info.identifier!r}")
 
+    cache_key = phone or contact_info.email or contact_info.identifier
+    if not cache_key:
+        return await _resolve_contact_uncached(client, account_id, inbox_id, contact_info, phone)
+
+    async def _factory() -> dict:
+        return await _resolve_contact_uncached(client, account_id, inbox_id, contact_info, phone)
+
+    return await get_contact_cache().get_or_create(f"mgmt:{cache_key}", _factory)
+
+
+async def _resolve_contact_uncached(
+    client, account_id: int, inbox_id: int, contact_info, phone: Optional[str],
+) -> dict:
+    """Find existing contact or create a new one (called through the cache)."""
     search_key = phone or contact_info.email or contact_info.identifier
     if search_key:
         try:
+            # Indexed equality lookups — /contacts/search?q= is a fuzzy ILIKE
+            # that sequentially scans the whole contacts table.  Identifier has
+            # no safe exact-match filter (FilterService downcases the value),
+            # so it stays on search.
             if phone:
-                # Indexed equality lookup — /contacts/search?q= is a fuzzy ILIKE
-                # that sequentially scans the whole contacts table.
                 search_data = await client.filter_contacts_by_phone(account_id, phone)
+            elif contact_info.email:
+                search_data = await client.filter_contacts_by_email(account_id, contact_info.email)
             else:
                 search_data = await client.search_contacts(account_id, q=search_key)
-            contacts = search_data.get("payload", [])
-            for c in contacts:
-                if (c.get("phone_number") == phone or
-                        c.get("email") == contact_info.email or
-                        c.get("identifier") == contact_info.identifier):
-                    logger.info(f"Found existing contact: {c['id']}")
-                    return c
+            # Each comparison requires the field to be populated on both sides —
+            # comparing directly lets None == None match, so a contact with no
+            # email would match any candidate that also lacks one.
+            for c in search_data.get("payload", []):
+                for field, wanted in (("phone_number", phone),
+                                      ("email", contact_info.email),
+                                      ("identifier", contact_info.identifier)):
+                    if wanted and c.get(field) == wanted:
+                        logger.info(f"Found existing contact: {c['id']}")
+                        return c
         except ChatwootAPIError:
             pass
 

@@ -247,21 +247,46 @@ class DistributedTokenBucket:
         self._burst = burst
         self._key = key
         self._script_sha: Optional[str] = None
+        # Degraded-mode fallback. If Redis is unreachable we must NOT allow
+        # traffic through unthrottled — this is the only global control, so
+        # failing open drops the fleet ceiling to `rate × task_count` at once,
+        # silently. Falling back to a local bucket keeps each task at `rate`,
+        # which is degraded but bounded.
+        self._local_fallback = TokenBucket(rate=rate, burst=burst)
+        self._degraded = False
+        self._redis_errors = 0
 
     @property
     def rate(self) -> float:
         return self._rate
 
+    @property
+    def degraded(self) -> bool:
+        """True while Redis is unreachable and the local fallback is in use."""
+        return self._degraded
+
     async def acquire(self) -> None:
-        """Wait until a token is available globally, then consume one."""
+        """Wait until a token is available globally, then consume one.
+
+        Falls back to a per-task local bucket while Redis is unreachable, so
+        throttling degrades from `rate` fleet-wide to `rate` per task rather
+        than disappearing entirely.
+        """
         while True:
             wait = await self._try_acquire()
+            if wait is None:                      # Redis down — degraded mode
+                await self._local_fallback.acquire()
+                return
             if wait <= 0:
                 return
             await asyncio.sleep(wait)
 
-    async def _try_acquire(self) -> float:
-        """Execute the Lua script and return wait time (0 = acquired)."""
+    async def _try_acquire(self) -> Optional[float]:
+        """Execute the Lua script.
+
+        Returns the wait time in seconds (0 = acquired), or None if Redis is
+        unreachable and the caller should use the local fallback.
+        """
         now = time.time()  # wall-clock (consistent across instances)
         try:
             result = await self._redis.eval(
@@ -272,11 +297,28 @@ class DistributedTokenBucket:
                 str(self._burst),
                 str(now),
             )
-            return float(result)
         except Exception as exc:
-            # If Redis is unreachable, fall through (don't block forever)
-            logger.warning(f"⚠️  DistributedTokenBucket Redis error (allowing through): {exc}")
-            return 0.0
+            self._redis_errors += 1
+            if not self._degraded:
+                # Log the transition at ERROR once, not every call — this is an
+                # operational event worth alerting on, and a tight failure loop
+                # would otherwise bury it in thousands of WARNING lines.
+                self._degraded = True
+                logger.error(
+                    f"🚨 DistributedTokenBucket DEGRADED — Redis unreachable, falling back to "
+                    f"per-task local bucket at {self._rate}/sec (fleet ceiling is now "
+                    f"{self._rate}/sec × task count): {exc}"
+                )
+            return None
+
+        if self._degraded:
+            self._degraded = False
+            logger.warning(
+                f"✅ DistributedTokenBucket RECOVERED — global {self._rate}/sec limit restored "
+                f"after {self._redis_errors} Redis error(s)"
+            )
+            self._redis_errors = 0
+        return float(result)
 
 
 # ---------------------------------------------------------------------------

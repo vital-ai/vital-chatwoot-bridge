@@ -50,6 +50,10 @@ dev = [
     "black>=23.0.0",
     "flake8>=6.0.0",
     "mypy>=1.0.0",
+    # test_endpoint_scripts/test_contact_lookup_perf.py samples pg_stat_statements
+    # and GIN pending-list state directly. Test-only — deliberately not in
+    # requirements.txt, since the runtime image never talks to Postgres.
+    "asyncpg>=0.29.0",
 ]
 
 [project.urls]

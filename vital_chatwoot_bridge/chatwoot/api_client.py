@@ -555,29 +555,36 @@ class ChatwootAPIClient:
         except Exception as e:
             raise ChatwootAPIError(f"Error searching contacts: {e}")
 
-    async def filter_contacts_by_phone(
+    async def filter_contacts(
         self,
         account_id: int,
-        phone_number: str,
+        attribute_key: str,
+        value: str,
         page: int = 1
     ) -> Dict[str, Any]:
-        """Find contacts by exact phone number. Returns raw API response dict.
+        """Find contacts by exact attribute match. Returns raw API response dict.
 
         Uses POST /api/v1/accounts/{account_id}/contacts/filter with an
-        ``equal_to`` operator, which resolves via the indexed equality on
-        contacts(phone_number, account_id).  The /contacts/search?q= endpoint
-        is a fuzzy ILIKE across five columns and sequentially scans the whole
-        contacts table — prefer this for E.164 lookups.
+        ``equal_to`` operator, which resolves via an indexed equality:
+        contacts(phone_number, account_id) or contacts(account_id, email).
+        The /contacts/search?q= endpoint is a fuzzy ILIKE across five columns
+        and sequentially scans the whole contacts table — prefer this whenever
+        the exact value is known.
 
         NOTE: Chatwoot's Contacts::FilterService prepends "+" to phone_number
-        values itself, so the leading "+" must be stripped here or the lookup
-        searches for "++1555…" and silently matches nothing.
+        values itself, so the leading "+" must be stripped or the lookup
+        searches for "++1555…" and silently matches nothing.  It also downcases
+        every non-phone value, which is safe for email (Chatwoot stores emails
+        downcased) but not for case-sensitive identifiers.
         """
+        if attribute_key == "phone_number":
+            value = value.lstrip("+")
+
         url = f"{self.base_url}/api/v1/accounts/{account_id}/contacts/filter"
         payload = [{
-            "attribute_key": "phone_number",
+            "attribute_key": attribute_key,
             "filter_operator": "equal_to",
-            "values": [phone_number.lstrip("+")],
+            "values": [value],
             "query_operator": None,
         }]
         try:
@@ -596,6 +603,24 @@ class ChatwootAPIClient:
             raise
         except Exception as e:
             raise ChatwootAPIError(f"Error filtering contacts: {e}")
+
+    async def filter_contacts_by_phone(
+        self,
+        account_id: int,
+        phone_number: str,
+        page: int = 1
+    ) -> Dict[str, Any]:
+        """Find contacts by exact E.164 phone number."""
+        return await self.filter_contacts(account_id, "phone_number", phone_number, page)
+
+    async def filter_contacts_by_email(
+        self,
+        account_id: int,
+        email: str,
+        page: int = 1
+    ) -> Dict[str, Any]:
+        """Find contacts by exact email (case-insensitive)."""
+        return await self.filter_contacts(account_id, "email", email, page)
 
     async def get_contact(
         self,
