@@ -1133,6 +1133,13 @@ CHATWOOT_MESSAGE_PAGE_SIZE = 20
 # binds the result is reported as truncated rather than presented as complete.
 MAX_MESSAGE_PAGES = 10
 
+# Ceiling on conversations fetched concurrently. These calls go through
+# ChatwootAPIClient, which — unlike ChatwootClientAPI — has no semaphore, no
+# token bucket and no httpx `limits=`, so nothing else bounds this fan-out.
+# Without it a windowed request could put MAX_CONVERSATIONS x MAX_MESSAGE_PAGES
+# unthrottled requests at Chatwoot in a burst.
+MAX_CONCURRENT_CONVERSATION_FETCHES = 5
+
 
 def _to_datetime(value: Any) -> Optional[datetime]:
     """Parse a Chatwoot timestamp (ISO 8601 string or epoch seconds) to UTC."""
@@ -1400,6 +1407,14 @@ async def get_communications(
                         if not windowed or _message_in_window(m, since_dt, until_dt)
                     )
 
+                    # Paging runs newest -> oldest, so once the cap is filled
+                    # every further page can only yield older messages that the
+                    # cap would discard. Keep paging while `collected` is short,
+                    # which is the case when the window excludes recent traffic.
+                    if len(collected) >= MAX_MESSAGES_PER_CONVERSATION:
+                        truncated = True
+                        break
+
                     if not windowed:
                         # A full page means Chatwoot may be holding more.
                         truncated = len(batch) >= CHATWOOT_MESSAGE_PAGE_SIZE
@@ -1415,7 +1430,15 @@ async def get_communications(
                     if len(batch) < CHATWOOT_MESSAGE_PAGE_SIZE:
                         break          # start of the conversation reached
 
-                    before = min(m["id"] for m in fresh if m.get("id") is not None)
+                    page_ids = [m["id"] for m in fresh if m.get("id") is not None]
+                    if not page_ids:
+                        # No cursor to page from. Theoretical — Chatwoot always
+                        # sets message ids — but min() on an empty sequence
+                        # raises ValueError, which this handler does not catch
+                        # and would surface as a 500.
+                        truncated = True
+                        break
+                    before = min(page_ids)
                 else:
                     # Loop exhausted its page budget with more history available.
                     truncated = True
@@ -1436,8 +1459,17 @@ async def get_communications(
                 logger.warning(f"Failed to fetch messages for conversation {cid}")
                 return [], False
 
+        # Bound the fan-out. ChatwootAPIClient has no semaphore or rate limiter
+        # of its own, so this is the only thing standing between a windowed
+        # request and a burst of MAX_CONVERSATIONS x MAX_MESSAGE_PAGES calls.
+        fetch_sem = asyncio.Semaphore(MAX_CONCURRENT_CONVERSATION_FETCHES)
+
+        async def _fetch_messages_bounded(conv: Dict) -> Tuple[List[Dict], bool]:
+            async with fetch_sem:
+                return await _fetch_messages(conv)
+
         fetched = await asyncio.gather(
-            *[_fetch_messages(c) for c in capped_convs]
+            *[_fetch_messages_bounded(c) for c in capped_convs]
         )
         message_lists = [m for m, _ in fetched]
         message_truncation = [t for _, t in fetched]
