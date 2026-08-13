@@ -7,7 +7,6 @@ import asyncio
 import io
 import json
 import logging
-import random
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 
@@ -15,6 +14,7 @@ import httpx
 from pydantic import ValidationError
 
 from vital_chatwoot_bridge.core.config import get_settings
+from vital_chatwoot_bridge.chatwoot.throttle import request_with_retry
 from vital_chatwoot_bridge.chatwoot.client_models import (
     ChatwootContact, ChatwootContactResponse,
     ChatwootConversationRequest, ChatwootConversationResponse,
@@ -22,11 +22,6 @@ from vital_chatwoot_bridge.chatwoot.client_models import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Ceiling on retry backoff. A server-supplied Retry-After is honoured up to this
-# point; beyond it the request fails fast rather than holding a worker and a
-# semaphore slot hostage.
-_MAX_RETRY_DELAY = 30.0
 
 # Losing a contact-create race is normal under concurrency; the winner's row may
 # not be visible to our connection on the very next read.
@@ -143,51 +138,16 @@ class ChatwootClientAPI:
         all return at the same instant, and the delay is capped so a large
         Retry-After cannot park a worker indefinitely.
         """
-        sem = _get_semaphore()
-        max_attempts = self.settings.rl_retry_max_attempts
-        base_delay = self.settings.rl_retry_base_delay
-
-        last_response: Optional[httpx.Response] = None
-        for attempt in range(1, max_attempts + 1):
-            async with sem:
-                last_response = await self.client.request(method, url, **kwargs)
-
-            status = last_response.status_code
-
-            # Success or client error (not retryable)
-            if status < 500 and status not in (429,):
-                return last_response
-
-            # Determine delay
-            if status in (429, 503):
-                retry_after = last_response.headers.get("Retry-After")
-                if retry_after:
-                    try:
-                        delay = float(retry_after)
-                    except ValueError:
-                        delay = base_delay * (2 ** (attempt - 1))
-                else:
-                    delay = base_delay * (2 ** (attempt - 1))
-            else:
-                # Other 5xx — single retry with base delay
-                delay = base_delay
-                if attempt >= 2:
-                    break  # Only one retry for generic 5xx
-
-            if attempt < max_attempts:
-                # Equal jitter: half the delay fixed, half random. Without this,
-                # every task 429'd in the same instant retries in the same
-                # instant, reproducing the burst that caused the 429.
-                delay = min(delay, _MAX_RETRY_DELAY)
-                delay = delay / 2 + random.uniform(0, delay / 2)
-                logger.warning(
-                    f"🚦 Chatwoot API {status} on {method} {url} — "
-                    f"retry {attempt}/{max_attempts} after {delay:.1f}s"
-                )
-                await asyncio.sleep(delay)
-
-        # All retries exhausted — return last response for caller to handle
-        return last_response
+        return await request_with_retry(
+            self.client,
+            method,
+            url,
+            semaphore=_get_semaphore(),
+            max_attempts=self.settings.rl_retry_max_attempts,
+            base_delay=self.settings.rl_retry_base_delay,
+            label="Chatwoot API",
+            **kwargs,
+        )
 
     async def create_or_get_contact(
         self, 

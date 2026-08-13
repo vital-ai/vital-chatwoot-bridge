@@ -8,6 +8,7 @@ import base64
 import logging
 import re
 from datetime import datetime, timezone
+from urllib.parse import unquote, urlparse
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -29,6 +30,7 @@ from vital_chatwoot_bridge.email.renderer import get_renderer
 from vital_chatwoot_bridge.chatwoot.communication_models import (
     CommunicationSender, CommunicationMessage, CommunicationConversation,
     CommunicationContact, CommunicationSummary, CommunicationsResponse,
+    CommunicationAttachment,
 )
 from vital_chatwoot_bridge.services.inbox_cache import get_inbox_cache
 from vital_chatwoot_bridge.services.message_webhook import fire_message_event
@@ -1133,12 +1135,6 @@ CHATWOOT_MESSAGE_PAGE_SIZE = 20
 # binds the result is reported as truncated rather than presented as complete.
 MAX_MESSAGE_PAGES = 10
 
-# Ceiling on conversations fetched concurrently. These calls go through
-# ChatwootAPIClient, which — unlike ChatwootClientAPI — has no semaphore, no
-# token bucket and no httpx `limits=`, so nothing else bounds this fan-out.
-# Without it a windowed request could put MAX_CONVERSATIONS x MAX_MESSAGE_PAGES
-# unthrottled requests at Chatwoot in a burst.
-MAX_CONCURRENT_CONVERSATION_FETCHES = 5
 
 
 def _to_datetime(value: Any) -> Optional[datetime]:
@@ -1204,6 +1200,34 @@ def _message_direction(msg: Dict[str, Any]) -> str:
     if mt in ("incoming", 0):
         return "inbound"
     return "outbound"
+
+
+def _message_attachments(msg: Dict[str, Any]) -> List["CommunicationAttachment"]:
+    """Map Chatwoot's attachment payload, deriving a filename from the data_url.
+
+    Chatwoot exposes no filename field — it lives in the last path segment of
+    the ActiveStorage URL (".../IMG_4279.png"). Query strings and URL-encoding
+    are stripped; anything unparseable yields None rather than a guess.
+    """
+    out: List[CommunicationAttachment] = []
+    for att in msg.get("attachments") or []:
+        filename = None
+        data_url = att.get("data_url")
+        if data_url:
+            tail = unquote(urlparse(str(data_url)).path.rsplit("/", 1)[-1])
+            filename = tail or None
+        out.append(CommunicationAttachment(
+            id=int(att.get("id", 0)),
+            file_type=att.get("file_type") or "file",
+            filename=filename,
+            extension=att.get("extension"),
+            file_size=att.get("file_size"),
+            data_url=data_url,
+            thumb_url=att.get("thumb_url"),
+            width=att.get("width"),
+            height=att.get("height"),
+        ))
+    return out
 
 
 def _message_sender(msg: Dict[str, Any]) -> CommunicationSender:
@@ -1455,21 +1479,27 @@ async def get_communications(
                     )
                     return collected[:MAX_MESSAGES_PER_CONVERSATION], True
                 return collected, truncated
-            except ChatwootAPIError:
-                logger.warning(f"Failed to fetch messages for conversation {cid}")
-                return [], False
+            except ChatwootAPIError as e:
+                # A failed fetch means messages were omitted, so the result is
+                # truncated — NOT an empty-but-complete conversation. This path
+                # is reached on 429s in particular: ChatwootAPIClient has no
+                # backoff or Retry-After handling (see issues/002), so rate
+                # limiting lands here, and reporting completeness would turn a
+                # throttled request into silently missing history.
+                logger.warning(
+                    f"Failed to fetch messages for conversation {cid} "
+                    f"(reporting as truncated): {e}"
+                )
+                # Keep whatever pages did succeed rather than discarding them.
+                collected.sort(key=lambda m: m.get("created_at") or 0, reverse=True)
+                return collected[:MAX_MESSAGES_PER_CONVERSATION], True
 
-        # Bound the fan-out. ChatwootAPIClient has no semaphore or rate limiter
-        # of its own, so this is the only thing standing between a windowed
-        # request and a burst of MAX_CONVERSATIONS x MAX_MESSAGE_PAGES calls.
-        fetch_sem = asyncio.Semaphore(MAX_CONCURRENT_CONVERSATION_FETCHES)
-
-        async def _fetch_messages_bounded(conv: Dict) -> Tuple[List[Dict], bool]:
-            async with fetch_sem:
-                return await _fetch_messages(conv)
-
+        # The fan-out is bounded by ChatwootAPIClient's own management
+        # semaphore (see chatwoot/throttle.py), so no route-level bound is
+        # needed here — a second, differently-sized limit would only obscure
+        # which one is actually binding.
         fetched = await asyncio.gather(
-            *[_fetch_messages_bounded(c) for c in capped_convs]
+            *[_fetch_messages(c) for c in capped_convs]
         )
         message_lists = [m for m, _ in fetched]
         message_truncation = [t for _, t in fetched]
@@ -1499,8 +1529,10 @@ async def get_communications(
                 ca = m.get("content_attributes") or {}
                 subject = ca.get("email", {}).get("subject") if isinstance(ca.get("email"), dict) else None
 
+                raw_type = m.get("message_type")
                 enriched_msgs.append(CommunicationMessage(
                     id=int(m.get("id", 0)),
+                    message_type=raw_type if isinstance(raw_type, int) else None,
                     direction=_message_direction(m),
                     content=m.get("content") or "",
                     content_type=m.get("content_type", "text"),
@@ -1509,6 +1541,7 @@ async def get_communications(
                     sender=_message_sender(m),
                     private=m.get("private", False),
                     created_at=ts,
+                    attachments=_message_attachments(m),
                 ))
                 all_timestamps.append(ts)
 

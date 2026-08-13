@@ -15,6 +15,7 @@ import httpx
 from pydantic import ValidationError
 
 from vital_chatwoot_bridge.core.config import get_settings
+from vital_chatwoot_bridge.chatwoot.throttle import request_with_retry
 from vital_chatwoot_bridge.chatwoot.models import (
     ChatwootAPIMessageRequest, ChatwootAPIMessageResponse,
     ChatwootAttachment, ChatwootConversation, ChatwootMessage,
@@ -22,6 +23,27 @@ from vital_chatwoot_bridge.chatwoot.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Process-wide concurrency bound for the management API. Kept separate from the
+# webhook-path semaphore in client_api.py — see throttle.py for why the two
+# budgets are not shared.
+_management_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _get_management_semaphore() -> asyncio.Semaphore:
+    """Lazy-init the shared management-API semaphore.
+
+    Created lazily so it binds to the running event loop rather than import time.
+    """
+    global _management_semaphore
+    if _management_semaphore is None:
+        settings = get_settings()
+        _management_semaphore = asyncio.Semaphore(settings.rl_max_management_concurrency)
+        logger.info(
+            f"🚦 Chatwoot management semaphore initialized — "
+            f"max_concurrency={settings.rl_max_management_concurrency}"
+        )
+    return _management_semaphore
 
 
 class ChatwootAPIError(Exception):
@@ -38,8 +60,21 @@ class ChatwootAPIClient:
     
     def __init__(self):
         self.settings = get_settings()
-        # Retry transport for transient failures on idempotent requests
-        transport = httpx.AsyncHTTPTransport(retries=3)
+        # Retry transport for transient failures on idempotent requests. This
+        # covers connection-level errors only — HTTP status retries (429/503)
+        # are handled in _request().
+        #
+        # Pool bounds must be set on the TRANSPORT, not the client: httpx
+        # ignores a client-level `limits=` whenever a custom transport is
+        # supplied, so setting it there looks correct and silently leaves the
+        # default of 100 max connections in place.
+        transport = httpx.AsyncHTTPTransport(
+            retries=3,
+            limits=httpx.Limits(
+                max_connections=self.settings.rl_max_management_concurrency * 2,
+                max_keepalive_connections=self.settings.rl_max_management_concurrency,
+            ),
+        )
         self.client = httpx.AsyncClient(
             transport=transport,
             timeout=httpx.Timeout(30.0),
@@ -49,6 +84,25 @@ class ChatwootAPIClient:
             event_hooks={"response": [self._on_response]},
         )
         self.base_url = self.settings.chatwoot_base_url.rstrip('/')
+
+    async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Execute a request under the management concurrency bound, with retry.
+
+        Every call in this class goes through here. Previously each method hit
+        ``self.client`` directly, so the management API — the whole of
+        chatwoot_management_routes, inbox_cache and the contact lookups — ran
+        with no concurrency bound and no 429 handling whatsoever.
+        """
+        return await request_with_retry(
+            self.client,
+            method,
+            url,
+            semaphore=_get_management_semaphore(),
+            max_attempts=self.settings.rl_retry_max_attempts,
+            base_delay=self.settings.rl_retry_base_delay,
+            label="Chatwoot management API",
+            **kwargs,
+        )
 
     @staticmethod
     async def _on_response(response: httpx.Response) -> None:
@@ -174,8 +228,8 @@ class ChatwootAPIClient:
                 headers = {k: v for k, v in self.client.headers.items()
                            if k.lower() != "content-type"}
 
-                response = await self.client.post(
-                    url, data=data, files=files, headers=headers
+                response = await self._request(
+                    "POST", url, data=data, files=files, headers=headers
                 )
             else:
                 # -- JSON path (no file uploads) ----------------------------
@@ -195,7 +249,7 @@ class ChatwootAPIClient:
                         for a in attachments if a.signed_id
                     ]
 
-                response = await self.client.post(url, json=payload)
+                response = await self._request("POST", url, json=payload)
             
             logger.info(f"✅ REST: Received response from Chatwoot API: HTTP {response.status_code}")
             
@@ -257,7 +311,7 @@ class ChatwootAPIClient:
         try:
             url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/{conversation_id}"
             
-            response = await self.client.get(url)
+            response = await self._request("GET", url)
             
             if response.status_code == 200:
                 conversation_data = response.json()
@@ -303,7 +357,7 @@ class ChatwootAPIClient:
             if assignee_type:
                 params["assignee_type"] = assignee_type
             
-            response = await self.client.get(url, params=params)
+            response = await self._request("GET", url, params=params)
             
             if response.status_code == 200:
                 data = response.json()
@@ -347,7 +401,7 @@ class ChatwootAPIClient:
             url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages"
             
             params = {"page": page}
-            response = await self.client.get(url, params=params)
+            response = await self._request("GET", url, params=params)
             
             if response.status_code == 200:
                 data = response.json()
@@ -410,7 +464,7 @@ class ChatwootAPIClient:
                 logger.warning("No update data provided")
                 return False
             
-            response = await self.client.patch(url, json=update_data)
+            response = await self._request("PATCH", url, json=update_data)
             
             if response.status_code == 200:
                 logger.info(f"Conversation {conversation_id} updated successfully")
@@ -459,7 +513,7 @@ class ChatwootAPIClient:
             if custom_attributes:
                 contact_data["custom_attributes"] = custom_attributes
             
-            response = await self.client.post(url, json=contact_data)
+            response = await self._request("POST", url, json=contact_data)
             
             if response.status_code == 200:
                 contact = response.json()
@@ -484,7 +538,7 @@ class ChatwootAPIClient:
             # Try to access a valid Chatwoot API endpoint with account ID
             url = f"{self.base_url}/api/v1/accounts/{self.settings.chatwoot_account_id}/conversations"
             
-            response = await self.client.get(url)
+            response = await self._request("GET", url)
             
             if response.status_code in [200, 401, 403]:
                 # 200 = success, 401/403 = auth issue but API is accessible
@@ -515,7 +569,7 @@ class ChatwootAPIClient:
         # Chatwoot uses 15 per page by default; we pass our per_page preference
         # but Chatwoot may not honor it — we document this in response
         try:
-            response = await self.client.get(url, params=params)
+            response = await self._request("GET", url, params=params)
             if response.status_code == 200:
                 return response.json()
             body = response.text[:500]
@@ -541,7 +595,7 @@ class ChatwootAPIClient:
         if q:
             params["q"] = q
         try:
-            response = await self.client.get(url, params=params)
+            response = await self._request("GET", url, params=params)
             if response.status_code == 200:
                 return response.json()
             body = response.text[:500]
@@ -589,8 +643,8 @@ class ChatwootAPIClient:
             "query_operator": None,
         }]
         try:
-            response = await self.client.post(
-                url, json={"payload": payload}, params={"page": page}
+            response = await self._request(
+                "POST", url, json={"payload": payload}, params={"page": page}
             )
             if response.status_code == 200:
                 return response.json()
@@ -631,7 +685,7 @@ class ChatwootAPIClient:
         """Get contact details. Returns raw API response dict."""
         url = f"{self.base_url}/api/v1/accounts/{account_id}/contacts/{contact_id}"
         try:
-            response = await self.client.get(url)
+            response = await self._request("GET", url)
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 404:
@@ -657,7 +711,7 @@ class ChatwootAPIClient:
         url = f"{self.base_url}/api/v1/accounts/{account_id}/contacts/{contact_id}/conversations"
         params = {"page": page}
         try:
-            response = await self.client.get(url, params=params)
+            response = await self._request("GET", url, params=params)
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 404:
@@ -681,7 +735,7 @@ class ChatwootAPIClient:
         """Create a contact. Returns raw API response dict."""
         url = f"{self.base_url}/api/v1/accounts/{account_id}/contacts"
         try:
-            response = await self.client.post(url, json=data)
+            response = await self._request("POST", url, json=data)
             if response.status_code in [200, 201]:
                 return response.json()
             body = response.text[:500]
@@ -703,7 +757,7 @@ class ChatwootAPIClient:
         """Delete a contact. Returns empty dict on success."""
         url = f"{self.base_url}/api/v1/accounts/{account_id}/contacts/{contact_id}"
         try:
-            response = await self.client.delete(url)
+            response = await self._request("DELETE", url)
             if response.status_code in [200, 204]:
                 return response.json() if response.content else {}
             elif response.status_code == 404:
@@ -727,7 +781,7 @@ class ChatwootAPIClient:
         """Delete a conversation. Returns empty dict on success."""
         url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/{conversation_id}"
         try:
-            response = await self.client.delete(url)
+            response = await self._request("DELETE", url)
             if response.status_code in [200, 204]:
                 return response.json() if response.content else {}
             elif response.status_code == 404:
@@ -751,7 +805,7 @@ class ChatwootAPIClient:
         """Create a conversation. Returns raw API response dict."""
         url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations"
         try:
-            response = await self.client.post(url, json=data)
+            response = await self._request("POST", url, json=data)
             if response.status_code in [200, 201]:
                 return response.json()
             body = response.text[:500]
@@ -772,7 +826,7 @@ class ChatwootAPIClient:
         """List all agents. Returns list of agent dicts."""
         url = f"{self.base_url}/api/v1/accounts/{account_id}/agents"
         try:
-            response = await self.client.get(url)
+            response = await self._request("GET", url)
             if response.status_code == 200:
                 return response.json()
             body = response.text[:500]
@@ -793,7 +847,7 @@ class ChatwootAPIClient:
         """List all inboxes. Returns raw API response dict."""
         url = f"{self.base_url}/api/v1/accounts/{account_id}/inboxes"
         try:
-            response = await self.client.get(url)
+            response = await self._request("GET", url)
             if response.status_code == 200:
                 return response.json()
             body = response.text[:500]
@@ -816,7 +870,7 @@ class ChatwootAPIClient:
         """Get a single message by scanning conversation messages."""
         url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages"
         try:
-            response = await self.client.get(url)
+            response = await self._request("GET", url)
             if response.status_code == 200:
                 data = response.json()
                 for msg in data.get("payload", []):
@@ -846,7 +900,7 @@ class ChatwootAPIClient:
             f"/conversations/{conversation_id}/messages/{message_id}"
         )
         try:
-            response = await self.client.delete(url)
+            response = await self._request("DELETE", url)
             if response.status_code in [200, 204]:
                 return response.json() if response.content else {}
             elif response.status_code == 404:
@@ -874,7 +928,7 @@ class ChatwootAPIClient:
         if before is not None:
             params["before"] = before
         try:
-            response = await self.client.get(url, params=params or None)
+            response = await self._request("GET", url, params=params or None)
             if response.status_code == 200:
                 return response.json()
             body = response.text[:500]
@@ -896,7 +950,7 @@ class ChatwootAPIClient:
         """Get conversation details. Returns raw API response dict."""
         url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/{conversation_id}"
         try:
-            response = await self.client.get(url)
+            response = await self._request("GET", url)
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 404:
@@ -928,7 +982,7 @@ class ChatwootAPIClient:
         if inbox_id is not None:
             params["inbox_id"] = inbox_id
         try:
-            response = await self.client.get(url, params=params)
+            response = await self._request("GET", url, params=params)
             if response.status_code == 200:
                 return response.json()
             raise ChatwootAPIError(
@@ -954,7 +1008,7 @@ class ChatwootAPIClient:
         url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/filter"
         params = {"page": page}
         try:
-            response = await self.client.post(url, json={"payload": payload}, params=params)
+            response = await self._request("POST", url, json={"payload": payload}, params=params)
             if response.status_code == 200:
                 return response.json()
             raise ChatwootAPIError(
@@ -993,8 +1047,8 @@ class ChatwootAPIClient:
                 files = self._build_multipart_files(attachments)
                 headers = {k: v for k, v in self.client.headers.items()
                            if k.lower() != "content-type"}
-                response = await self.client.post(
-                    url, data=form_data, files=files, headers=headers
+                response = await self._request(
+                    "POST", url, data=form_data, files=files, headers=headers
                 )
             else:
                 if attachments:
@@ -1002,7 +1056,7 @@ class ChatwootAPIClient:
                         {"signed_id": a.signed_id}
                         for a in attachments if a.signed_id
                     ]
-                response = await self.client.post(url, json=data)
+                response = await self._request("POST", url, json=data)
 
             if response.status_code == 200:
                 return response.json()
@@ -1048,7 +1102,7 @@ class ChatwootAPIClient:
             }
         }
         try:
-            response = await self.client.post(url, json=payload)
+            response = await self._request("POST", url, json=payload)
             if response.status_code in (200, 201):
                 return DirectUploadResponse(**response.json())
             raise ChatwootAPIError(
@@ -1118,7 +1172,7 @@ class ChatwootAPIClient:
         """Update a contact. Returns raw API response dict."""
         url = f"{self.base_url}/api/v1/accounts/{account_id}/contacts/{contact_id}"
         try:
-            response = await self.client.patch(url, json=data)
+            response = await self._request("PATCH", url, json=data)
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 404:
@@ -1147,7 +1201,7 @@ class ChatwootAPIClient:
             "mergee_contact_id": mergee_contact_id,
         }
         try:
-            response = await self.client.post(url, json=payload)
+            response = await self._request("POST", url, json=payload)
             if response.status_code == 200:
                 return response.json()
             body = response.text[:500]
@@ -1170,7 +1224,7 @@ class ChatwootAPIClient:
         """Update a conversation (status, assignee, etc.). Returns raw API response dict."""
         url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/{conversation_id}"
         try:
-            response = await self.client.patch(url, json=data)
+            response = await self._request("PATCH", url, json=data)
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 404:
@@ -1195,7 +1249,7 @@ class ChatwootAPIClient:
         counts = {}
         for conv_status in ("open", "resolved", "pending", "snoozed"):
             try:
-                response = await self.client.get(url, params={"status": conv_status, "page": 1})
+                response = await self._request("GET", url, params={"status": conv_status, "page": 1})
                 if response.status_code == 200:
                     data = response.json()
                     meta = data.get("data", {}).get("meta", {})

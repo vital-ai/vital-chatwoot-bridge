@@ -262,6 +262,11 @@ class Config:
         self.rl_redis_url = _get(rl, "redis_url")  # required when queue_backend=redis
         self.rl_redis_queue_key = _get(rl, "redis_queue_key", default="cw_bridge:attentive_queue")
         self.rl_max_chatwoot_concurrency = _get_int(rl, "max_chatwoot_concurrency", default=3)
+        # Separate budget for the management API. Kept higher than the webhook
+        # budget above because those routes are interactive and fan out (one
+        # /communications call can issue several hundred upstream requests),
+        # whereas max_chatwoot_concurrency is tuned for sustained blast traffic.
+        self.rl_max_management_concurrency = _get_int(rl, "max_management_concurrency", default=8)
         self.rl_attentive_workers = _get_int(rl, "attentive_workers", default=3)
         self.rl_attentive_queue_size = _get_int(rl, "attentive_queue_size", default=5000)
         self.rl_attentive_max_per_second = _get_float(rl, "attentive_max_per_second", default=1.5)
@@ -273,6 +278,7 @@ class Config:
         logger.info(
             f"📋 CONFIG: Rate limiting — backend={self.rl_queue_backend}, "
             f"concurrency={self.rl_max_chatwoot_concurrency}, "
+            f"mgmt_concurrency={self.rl_max_management_concurrency}, "
             f"workers={self.rl_attentive_workers}, "
             f"max_per_second={self.rl_attentive_max_per_second}, "
             f"allowed_events={self.rl_attentive_allowed_events}"
