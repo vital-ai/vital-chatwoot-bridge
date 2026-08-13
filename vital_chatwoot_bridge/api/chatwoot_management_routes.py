@@ -7,8 +7,8 @@ import asyncio
 import base64
 import logging
 import re
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -1123,6 +1123,54 @@ MAX_CONVERSATIONS = 20
 MAX_MESSAGES_PER_CONVERSATION = 50
 
 
+def _to_datetime(value: Any) -> Optional[datetime]:
+    """Parse a Chatwoot timestamp (ISO 8601 string or epoch seconds) to UTC."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _message_in_window(
+    msg: Dict[str, Any], since_dt: Optional[datetime], until_dt: Optional[datetime]
+) -> bool:
+    """True when a message falls inside the requested date window."""
+    ts = _parse_message_created_at(msg)
+    msg_dt = _to_datetime(ts) if ts else None
+    if msg_dt is None:
+        # Undateable messages cannot be shown to satisfy a date filter.
+        return False
+    if since_dt and msg_dt < since_dt:
+        return False
+    if until_dt and msg_dt > until_dt:
+        return False
+    return True
+
+
+def _conversation_in_window(
+    conv: Dict[str, Any], since_dt: Optional[datetime], until_dt: Optional[datetime]
+) -> bool:
+    """True unless the conversation provably cannot contain a message in window.
+
+    Conservative on purpose — a conversation is only excluded when its whole
+    lifetime falls outside the window. Anything ambiguous (missing or
+    unparseable timestamps) is kept and filtered at the message level.
+    """
+    last_activity = _to_datetime(conv.get("last_activity_at"))
+    created = _to_datetime(conv.get("created_at"))
+
+    if since_dt and last_activity and last_activity < since_dt:
+        return False          # went quiet before the window opened
+    if until_dt and created and created > until_dt:
+        return False          # started after the window closed
+    return True
+
+
 def _parse_message_created_at(msg: Dict[str, Any]) -> Optional[str]:
     """Extract an ISO 8601 timestamp from a Chatwoot message dict."""
     raw = msg.get("created_at")
@@ -1241,10 +1289,17 @@ async def get_communications(
     since_dt: Optional[datetime] = None
     until_dt: Optional[datetime] = None
     try:
+        # Assume UTC when the caller omits an offset — message timestamps are
+        # always timezone-aware, and comparing them against a naive datetime
+        # raises TypeError rather than returning a wrong answer.
         if since:
             since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+            if since_dt.tzinfo is None:
+                since_dt = since_dt.replace(tzinfo=timezone.utc)
         if until:
             until_dt = datetime.fromisoformat(until.replace("Z", "+00:00"))
+            if until_dt.tzinfo is None:
+                until_dt = until_dt.replace(tzinfo=timezone.utc)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -1268,32 +1323,67 @@ async def get_communications(
         if inbox_id is not None:
             all_convs = [c for c in all_convs if c.get("inbox_id") == inbox_id]
 
+        # Exclude conversations that cannot contain a message in the requested
+        # window BEFORE capping.  Capping first would drop the oldest
+        # conversations regardless of the window, so a historical query against
+        # a contact with many conversations silently lost the ones it asked for.
+        #
+        # The bound is deliberately conservative: a conversation is only dropped
+        # when it provably cannot contribute — it went quiet before `since`, or
+        # it started after `until`.  Filtering on last_activity_at alone would
+        # wrongly discard a still-active conversation that holds older messages.
+        if since_dt or until_dt:
+            all_convs = [c for c in all_convs if _conversation_in_window(c, since_dt, until_dt)]
+
         # Sort by last_activity_at (newest first) and cap
         all_convs.sort(
             key=lambda c: c.get("last_activity_at") or c.get("created_at") or 0,
             reverse=True,
         )
         capped_convs = all_convs[:MAX_CONVERSATIONS]
+        conversations_truncated = len(all_convs) > MAX_CONVERSATIONS
+        if conversations_truncated:
+            logger.warning(
+                f"Communications: contact {contact_id} matched {len(all_convs)} conversations, "
+                f"returning newest {MAX_CONVERSATIONS}"
+            )
 
         # Step 3: Fetch messages for each conversation in parallel
-        async def _fetch_messages(conv: Dict) -> List[Dict]:
+        async def _fetch_messages(conv: Dict) -> Tuple[List[Dict], bool]:
+            """Return (messages, truncated) for one conversation.
+
+            The date window is applied BEFORE the cap.  Capping first meant a
+            conversation with more than MAX_MESSAGES_PER_CONVERSATION messages
+            newer than `until` returned zero messages instead of the older ones
+            the caller asked for.
+            """
             cid = int(conv["id"])
             try:
                 data = await client.get_conversation_messages_raw(account_id, cid)
                 msgs = data.get("payload", [])
-                # Sort newest first, cap at MAX_MESSAGES_PER_CONVERSATION
+                if since_dt or until_dt:
+                    msgs = [m for m in msgs if _message_in_window(m, since_dt, until_dt)]
+                # Sort newest first, then cap
                 msgs.sort(
                     key=lambda m: m.get("created_at") or 0,
                     reverse=True,
                 )
-                return msgs[:MAX_MESSAGES_PER_CONVERSATION]
+                if len(msgs) > MAX_MESSAGES_PER_CONVERSATION:
+                    logger.warning(
+                        f"Communications: conversation {cid} matched {len(msgs)} messages, "
+                        f"returning newest {MAX_MESSAGES_PER_CONVERSATION}"
+                    )
+                    return msgs[:MAX_MESSAGES_PER_CONVERSATION], True
+                return msgs, False
             except ChatwootAPIError:
                 logger.warning(f"Failed to fetch messages for conversation {cid}")
-                return []
+                return [], False
 
-        message_lists = await asyncio.gather(
+        fetched = await asyncio.gather(
             *[_fetch_messages(c) for c in capped_convs]
         )
+        message_lists = [m for m, _ in fetched]
+        message_truncation = [t for _, t in fetched]
 
         # Step 4: Build enriched response
         result_conversations: List[CommunicationConversation] = []
@@ -1301,7 +1391,7 @@ async def get_communications(
         total_messages = 0
         all_timestamps: List[str] = []
 
-        for conv, msgs in zip(capped_convs, message_lists):
+        for conv, msgs, msgs_truncated in zip(capped_convs, message_lists, message_truncation):
             conv_inbox_id = int(conv.get("inbox_id", 0))
             channel = await inbox_cache.get_channel(conv_inbox_id)
             inbox_name = await inbox_cache.get_inbox_name(conv_inbox_id)
@@ -1313,16 +1403,8 @@ async def get_communications(
                 if ts is None:
                     continue
 
-                # Date filtering
-                if since_dt or until_dt:
-                    try:
-                        msg_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                    except ValueError:
-                        continue
-                    if since_dt and msg_dt < since_dt:
-                        continue
-                    if until_dt and msg_dt > until_dt:
-                        continue
+                # Date filtering already applied in _fetch_messages, before the
+                # per-conversation cap — see the comment there.
 
                 # Extract subject from content_attributes if present
                 ca = m.get("content_attributes") or {}
@@ -1355,6 +1437,7 @@ async def get_communications(
                 status=conv.get("status", "unknown"),
                 created_at=str(conv_created or ""),
                 messages=enriched_msgs,
+                messages_truncated=msgs_truncated,
             ))
 
         # Build summary
@@ -1368,6 +1451,9 @@ async def get_communications(
             total_messages=total_messages,
             channels=sorted(all_channels),
             date_range=date_range,
+            truncated=conversations_truncated or any(message_truncation),
+            conversations_available=len(all_convs),
+            conversations_returned=len(result_conversations),
         )
 
         contact_out = CommunicationContact(

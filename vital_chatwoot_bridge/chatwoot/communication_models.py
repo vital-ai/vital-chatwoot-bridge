@@ -32,6 +32,10 @@ class CommunicationConversation(BaseModel):
     status: str  # "open", "resolved", "pending"
     created_at: str
     messages: List[CommunicationMessage]
+    # True when this conversation held more matching messages than the per
+    # conversation cap. Without it a truncated result is indistinguishable
+    # from a complete one.
+    messages_truncated: bool = False
 
 
 class CommunicationContact(BaseModel):
@@ -46,6 +50,12 @@ class CommunicationSummary(BaseModel):
     total_messages: int
     channels: List[str]
     date_range: Dict[str, str]  # {"earliest": ..., "latest": ...}
+    # Truncation is bounded but not always avoidable, so report it rather than
+    # letting a partial result look complete.
+    truncated: bool = False
+    # Conversations matching the query before the cap was applied.
+    conversations_available: Optional[int] = None
+    conversations_returned: Optional[int] = None
 
 
 class CommunicationsResponse(BaseModel):
