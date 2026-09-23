@@ -349,6 +349,10 @@ def main():
         port=settings.port,
         reload=settings.debug,
         log_level="info" if not settings.debug else "debug",
+        # Must exceed the ALB idle timeout (60s) so the target never closes an
+        # idle keep-alive connection the ALB still considers usable, which the
+        # ALB would otherwise surface as a 502.
+        timeout_keep_alive=65,
     )
 
 
