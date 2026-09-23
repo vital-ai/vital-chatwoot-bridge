@@ -282,6 +282,17 @@ class WebhookHandler:
     async def _handle_outbound_message(self, event_data: ChatwootWebhookEvent) -> Dict[str, Any]:
         """Handle outbound message for LoopMessage integration."""
         try:
+            # Private notes are internal only — Chatwoot still fires webhooks for
+            # them, but they must never be delivered to the contact.
+            if event_data.private:
+                logger.info(
+                    f"🔒 Ignoring private note {event_data.id} — internal notes are not sent to LoopMessage"
+                )
+                return WebhookResponse(
+                    status="ignored",
+                    message="Private note ignored"
+                ).model_dump()
+
             # Extract inbox information - use internal inbox ID from conversation
             chatwoot_inbox_id = None
             if "inbox_id" in event_data.conversation:

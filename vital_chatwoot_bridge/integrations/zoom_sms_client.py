@@ -9,6 +9,7 @@ Sends SMS via Zoom Phone API and handles:
 """
 
 import logging
+from datetime import datetime, timezone
 from typing import Dict, Optional
 
 import httpx
@@ -17,6 +18,7 @@ from vital_chatwoot_bridge.zoom.models import (
     ZoomConfig, ZoomAccount, ZoomSmsSendResponse, generate_session_id,
 )
 from vital_chatwoot_bridge.zoom.oauth import ZoomOAuthManager, ZoomOAuthError
+from vital_chatwoot_bridge.utils.dry_run import is_dry_run, fake_provider_id, log_skipped_send
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +126,14 @@ class ZoomSmsClient:
         # Include user_id if we have it
         if account.zoom_user_id:
             body["sender"]["user_id"] = account.zoom_user_id
+
+        if is_dry_run():
+            log_skipped_send("zoom_sms", sender=account.phone_number, to=to, length=len(message))
+            return ZoomSmsSendResponse(
+                message_id=fake_provider_id("zoom"),
+                session_id=session_id,
+                date_time=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
 
         # Send with auto-refresh on 401
         return await self._send_with_retry(account_name, body)

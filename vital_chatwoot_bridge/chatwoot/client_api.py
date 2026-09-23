@@ -15,6 +15,9 @@ from pydantic import ValidationError
 
 from vital_chatwoot_bridge.core.config import get_settings
 from vital_chatwoot_bridge.chatwoot.throttle import request_with_retry
+from vital_chatwoot_bridge.utils.dry_run import (
+    apply_dry_run_to_message_payload, should_skip_chatwoot_message, fake_chatwoot_message,
+)
 from vital_chatwoot_bridge.chatwoot.client_models import (
     ChatwootContact, ChatwootContactResponse,
     ChatwootConversationRequest, ChatwootConversationResponse,
@@ -427,6 +430,18 @@ class ChatwootClientAPI:
             and any(a.file_bytes for a in message.file_attachments)
         )
 
+        guarded = apply_dry_run_to_message_payload({
+            "message_type": message.message_type,
+            "private": False,
+            "content_attributes": dict(message.content_attributes) if message.content_attributes else None,
+        })
+        private = guarded["private"]
+        content_attributes = guarded["content_attributes"]
+        if should_skip_chatwoot_message(guarded):
+            return ChatwootMessageResponse(
+                **fake_chatwoot_message(conversation_id, {**guarded, "content": message.content})
+            )
+
         try:
             logger.info(f"Sending message to conversation {conversation_id}")
 
@@ -435,13 +450,13 @@ class ChatwootClientAPI:
                 data: Dict[str, Any] = {
                     "content": message.content,
                     "message_type": message.message_type,
-                    "private": "false",
+                    "private": "true" if private else "false",
                     "content_type": message.content_type,
                 }
                 if message.echo_id:
                     data["echo_id"] = message.echo_id
-                if message.content_attributes:
-                    data["content_attributes"] = json.dumps(message.content_attributes)
+                if content_attributes:
+                    data["content_attributes"] = json.dumps(content_attributes)
 
                 files = self._build_multipart_files(message.file_attachments)
                 logger.info(f"📎 Uploading {len(files)} attachment(s) via multipart")
@@ -457,13 +472,13 @@ class ChatwootClientAPI:
                 payload: Dict[str, Any] = {
                     "content": message.content,
                     "message_type": message.message_type,
-                    "private": False,
+                    "private": private,
                     "content_type": message.content_type,
                 }
                 if message.echo_id:
                     payload["echo_id"] = message.echo_id
-                if message.content_attributes:
-                    payload["content_attributes"] = message.content_attributes
+                if content_attributes:
+                    payload["content_attributes"] = content_attributes
 
                 # Signed-ID-only attachments
                 if message.file_attachments:

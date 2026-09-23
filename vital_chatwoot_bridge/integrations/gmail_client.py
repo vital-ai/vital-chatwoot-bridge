@@ -17,6 +17,7 @@ from google.auth.transport.requests import Request
 from google.oauth2 import service_account
 
 from vital_chatwoot_bridge.email.models import GmailConfig, GmailSender
+from vital_chatwoot_bridge.utils.dry_run import is_dry_run, fake_provider_id, log_skipped_send
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +263,14 @@ class GmailClient:
 
         # Validate sender is whitelisted
         sender = self.get_sender(sender_email)
+
+        if is_dry_run():
+            log_skipped_send("gmail", sender=sender_email, to=to, cc=cc, bcc=bcc, subject=subject)
+            return {
+                "id": fake_provider_id("gmail"),
+                "threadId": fake_provider_id("gmail-thread"),
+                "labelIds": ["SENT"],
+            }
 
         logger.info(f"📧 Sending email via Gmail as {sender_email} to: {to}, subject: {subject}")
 

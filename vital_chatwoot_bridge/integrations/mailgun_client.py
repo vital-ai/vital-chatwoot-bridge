@@ -8,6 +8,7 @@ import httpx
 from typing import Dict, Any, Optional
 
 from vital_chatwoot_bridge.email.models import MailgunConfig
+from vital_chatwoot_bridge.utils.dry_run import is_dry_run, fake_provider_id, log_skipped_send
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,10 @@ class MailgunClient:
         sender = from_email or self.config.from_email
         if not sender:
             raise MailgunClientError("No sender address: provide from_email or configure mailgun.from_email")
+
+        if is_dry_run():
+            log_skipped_send("mailgun", from_email=sender, to=to, cc=cc, bcc=bcc, subject=subject)
+            return {"id": f"<{fake_provider_id('mailgun')}>", "message": "Dry run: not sent"}
 
         url = f"{self.config.base_url}/{self.config.domain}/messages"
 

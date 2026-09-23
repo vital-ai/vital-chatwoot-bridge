@@ -16,6 +16,9 @@ from pydantic import ValidationError
 
 from vital_chatwoot_bridge.core.config import get_settings
 from vital_chatwoot_bridge.chatwoot.throttle import request_with_retry
+from vital_chatwoot_bridge.utils.dry_run import (
+    apply_dry_run_to_message_payload, should_skip_chatwoot_message, fake_chatwoot_message,
+)
 from vital_chatwoot_bridge.chatwoot.models import (
     ChatwootAPIMessageRequest, ChatwootAPIMessageResponse,
     ChatwootAttachment, ChatwootConversation, ChatwootMessage,
@@ -196,6 +199,18 @@ class ChatwootAPIClient:
         Raises:
             ChatwootAPIError: If the API request fails
         """
+        guarded = apply_dry_run_to_message_payload({
+            "message_type": message_type,
+            "private": private,
+            "content_attributes": content_attributes,
+        })
+        private = guarded["private"]
+        content_attributes = guarded["content_attributes"]
+        if should_skip_chatwoot_message(guarded):
+            return ChatwootAPIMessageResponse(
+                **fake_chatwoot_message(conversation_id, {**guarded, "content": content})
+            )
+
         try:
             url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages"
             
@@ -1035,6 +1050,9 @@ class ChatwootAPIClient:
         is sent as JSON.
         """
         url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages"
+        apply_dry_run_to_message_payload(data)
+        if should_skip_chatwoot_message(data):
+            return fake_chatwoot_message(conversation_id, data)
         try:
             has_file_attachments = attachments and any(a.file_bytes for a in attachments)
 

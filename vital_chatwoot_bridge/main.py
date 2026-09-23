@@ -42,6 +42,18 @@ async def lifespan(app: FastAPI):
     global webhook_handler
     
     logger.info("Starting Vital Chatwoot Bridge...")
+
+    if settings.dry_run:
+        banner = "!" * 72
+        logger.warning(banner)
+        logger.warning("🧪 DRY RUN MODE ENABLED (CW_BRIDGE__app__dry_run=true)")
+        if settings.dry_run_record_notes:
+            logger.warning("   Outbound messages are recorded as private notes in Chatwoot.")
+        else:
+            logger.warning("   Outbound messages are NOT written to Chatwoot (dry_run_record_notes=false).")
+        logger.warning("   Inbound messages are NOT written to Chatwoot.")
+        logger.warning("   Mailgun, Gmail, Zoom SMS and LoopMessage sends are skipped.")
+        logger.warning(banner)
     
     try:
         # Initialize Chatwoot API client

@@ -8,6 +8,8 @@ import httpx
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
 
+from vital_chatwoot_bridge.utils.dry_run import is_dry_run, fake_provider_id, log_skipped_send
+
 logger = logging.getLogger(__name__)
 
 
@@ -345,6 +347,21 @@ class LoopMessageClient:
         Raises:
             LoopMessageClientError: If the request fails
         """
+        if method.upper() == "POST" and is_dry_run():
+            data = data or {}
+            log_skipped_send(
+                "loopmessage",
+                endpoint=endpoint,
+                recipient=data.get("recipient") or data.get("group"),
+                sender_name=data.get("sender_name"),
+            )
+            return {
+                "success": True,
+                "message_id": fake_provider_id("loopmessage"),
+                "recipient": data.get("recipient"),
+                "text": data.get("text"),
+            }
+
         url = f"{self.config.base_url}{endpoint}"
         
         headers = {

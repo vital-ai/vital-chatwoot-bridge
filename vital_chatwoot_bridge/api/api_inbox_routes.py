@@ -132,6 +132,11 @@ async def post_loopmessage_outbound(
         logger.info(f"📤 Received LoopMessage outbound webhook")
         logger.info(f"🔍 DEBUG: Webhook payload keys: {list(webhook_data.keys())}")
         
+        # Private notes are internal only — never deliver them to the contact
+        if webhook_data.get("private"):
+            logger.info("🔒 Ignoring private note — internal notes are not sent to LoopMessage")
+            return {"success": True, "message": "Private note ignored"}
+
         # Validate this is for LoopMessage inbox
         conversation = webhook_data.get("conversation", {})
         chatwoot_inbox_id = str(conversation.get("inbox_id"))

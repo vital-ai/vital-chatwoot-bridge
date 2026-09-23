@@ -77,6 +77,7 @@ class MemoryDBConfig(BaseModel):
     url: str = Field(..., description="MemoryDB connection URL (rediss://user:pass@host:port)")
     ssl: bool = Field(default=True, description="Enable TLS (MemoryDB always requires TLS)")
     ssl_cert_reqs: str = Field(default="none", description="SSL certificate verification mode")
+    cluster: bool = Field(default=True, description="Use cluster mode (MemoryDB); false for a standalone local Redis")
 
 
 class DebounceConfig(BaseModel):
@@ -163,6 +164,10 @@ class Config:
         self.log_level = _get(env_tree, "app", "log_level", default="INFO")
         self.log_format = _get(env_tree, "app", "log_format", default="text")
         self.environment = _get(env_tree, "app", "environment", default="development")
+        # Dry-run: outbound messages become private notes, provider sends are skipped
+        self.dry_run = _get_bool(env_tree, "app", "dry_run", default=False)
+        # In dry-run, record outbound messages as private notes (true) or skip the Chatwoot write (false)
+        self.dry_run_record_notes = _get_bool(env_tree, "app", "dry_run_record_notes", default=True)
         cors_env = _get(env_tree, "app", "cors_allowed_origins", default="*")
         self.allowed_origins = [o.strip() for o in cors_env.split(",")]
 
@@ -448,10 +453,11 @@ class Config:
             return None
         try:
             prepared = dict(tree)
-            if "ssl" in prepared and isinstance(prepared["ssl"], str):
-                prepared["ssl"] = prepared["ssl"].lower() == "true"
+            for flag in ("ssl", "cluster"):
+                if flag in prepared and isinstance(prepared[flag], str):
+                    prepared[flag] = prepared[flag].lower() == "true"
             config = MemoryDBConfig(**prepared)
-            logger.info(f"🗄️  CONFIG: MemoryDB configured — ssl={config.ssl}")
+            logger.info(f"🗄️  CONFIG: MemoryDB configured — ssl={config.ssl}, cluster={config.cluster}")
             return config
         except Exception as e:
             logger.error(f"❌ CONFIG: Failed to parse MemoryDB config: {e}")

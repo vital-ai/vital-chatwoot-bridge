@@ -573,6 +573,10 @@ async def post_message(
             detail=detail,
         )
 
+    # Dry-run: record every outbound message as a private note
+    if body.direction == "outbound" and get_settings().dry_run:
+        body.suppress_delivery = True
+
     try:
         logger.info(
             f"POST /messages request: direction={body.direction}, inbox_id={body.inbox_id}, "
@@ -2003,6 +2007,10 @@ async def send_templated_email(
     The template is rendered with the provided variables, then delivered
     as an HTML email using ``content_type="input_email"``.
     """
+    # Dry-run: record as a private note instead of dispatching
+    if get_settings().dry_run:
+        body.suppress_delivery = True
+
     renderer = get_renderer()
     if renderer is None:
         raise HTTPException(
