@@ -1,6 +1,6 @@
 """
 AIMP message client for communicating with AI agents using vital-agent-container-client.
-Handles per-message connections and AIMP message protocol.
+Handles per-message connections and AIMP message protocol (contract v2, vital-agent.v2).
 """
 
 import asyncio
@@ -13,8 +13,14 @@ from com_vitalai_aimp_domain.model.AIMPIntent import AIMPIntent
 from com_vitalai_aimp_domain.model.UserMessageContent import UserMessageContent
 from vital_ai_vitalsigns.utils.uri_generator import URIGenerator
 from vital_ai_vitalsigns.vitalsigns import VitalSigns
-from vital_agent_container_client.aimp_message_handler_inf import AIMPMessageHandlerInf
-from vital_agent_container_client.vital_agent_container_client import VitalAgentContainerClient
+from vital_agent_container_client import (
+    SUBPROTOCOL,
+    AIMPMessageHandlerInf,
+    AuthenticationError,
+    InteractionResult,
+    ProtocolMismatchError,
+    VitalAgentContainerClient,
+)
 
 from vital_chatwoot_bridge.core.config import get_settings
 from vital_chatwoot_bridge.core.models import BridgeToAgentMessage
@@ -108,57 +114,87 @@ class AimpMessageClient:
             logger.warning("🔑 AIMP: No JWT manager configured, proceeding without authentication")
         
         client = VitalAgentContainerClient(base_url=agent_url, handler=handler, jwt_token=jwt_token)
-        
+
         try:
             # Test health endpoint
             logger.info(f"🏥 AIMP: Testing agent health at {agent_url}")
             health = await client.check_health()
             if not health:
                 logger.warning(f"⚠️ AIMP: Agent health check failed")
-            
+
             # Create AIMP message from bridge message
             aimp_message_list = await self._create_aimp_message(message)
-            
+
             # Serialize AIMP message
             message_json = vs.to_json(aimp_message_list)
             message_list = json.loads(message_json)
-            
-            # Open WebSocket connection
+
+            # One connection per message: request() returns on the agent's "done";
+            # close_after asks the server to close once the handler returns.
+            # A timeout interrupts the agent's run, so it must exceed the longest
+            # legitimate run.
             logger.info(f"🔗 AIMP: Opening WebSocket connection")
-            await client.open_websocket()
-            
-            # Send AIMP message
-            logger.info(f"📤 AIMP: Sending AIMP message")
-            logger.info(f"🔍 DEBUG: Full AIMP message being sent: {message_list}")
-            await client.send_message(message_list)
-            
-            # Wait for response with timeout
-            logger.info(f"👂 AIMP: Waiting for responses (timeout: {timeout}s)")
-            await client.wait_for_close_or_timeout(timeout)
-            
-            # Get responses from handler
+            async with client:
+                logger.info(f"📤 AIMP: Sending AIMP message (timeout: {timeout}s)")
+                logger.info(f"🔍 DEBUG: Full AIMP message being sent: {message_list}")
+                result = await client.request(message_list, timeout=timeout, close_after=True)
+            logger.info(f"✅ AIMP: WebSocket connection closed")
+
+            self._log_interaction_result(result, message)
+
+            # Get responses from handler (kept even if the interaction didn't end ok:
+            # anything the agent sent before an error or timeout is still delivered)
             raw_responses = handler.get_responses()
-            
+
             # Convert AIMP responses to AgentChatResponse format
             responses = []
             for raw_response in raw_responses:
                 agent_response = self._parse_aimp_response(raw_response, message)
                 if agent_response:
                     responses.append(agent_response)
-            
+
             return responses
-            
+
+        except AuthenticationError as e:
+            logger.error(f"❌ AIMP: Agent rejected JWT at handshake: {e}")
+            return []
+
+        except ProtocolMismatchError as e:
+            logger.error(
+                f"❌ AIMP: Agent at {agent_url} does not speak {SUBPROTOCOL} "
+                f"(needs vital-agent-container-sdk>=0.2.0): {e}"
+            )
+            return []
+
         except Exception as e:
             logger.error(f"❌ AIMP: Error in AIMP communication: {e}")
             return []
-            
-        finally:
-            # Clean up WebSocket connection
-            try:
-                await client.close_websocket()
-                logger.info(f"✅ AIMP: WebSocket connection closed")
-            except Exception as e:
-                logger.warning(f"⚠️ AIMP: Error closing WebSocket: {e}")
+
+    def _log_interaction_result(self, result: InteractionResult, message: BridgeToAgentMessage) -> None:
+        """Log how the agent interaction ended."""
+        if result.handler_error is not None:
+            logger.error(f"❌ AIMP: Response handler raised for message {message.message_id}: {result.handler_error!r}")
+
+        if result.ok:
+            logger.info(f"✅ AIMP: Interaction {result.status} for message {message.message_id} ({result.messages_received} messages)")
+            return
+
+        if result.status == "timed_out":
+            detail = "client timeout; agent run interrupted"
+        elif result.close is not None and result.close.is_handler_timeout:
+            detail = "agent handler timeout (4008)"
+        elif result.close is not None and result.close.is_internal_error:
+            detail = "agent handler error (1011)"
+        elif result.close is not None and result.close.is_server_shutdown:
+            detail = "agent shutting down (1001)"
+        elif result.reconnect_suggested:
+            detail = "agent busy cancelling earlier runs; request not run"
+        else:
+            detail = f"close={result.close}"
+        logger.warning(
+            f"⚠️ AIMP: Interaction for message {message.message_id} ended {result.status}: "
+            f"{detail} ({result.messages_received} messages received)"
+        )
     
     async def _create_aimp_message(self, message: BridgeToAgentMessage) -> List:
         """Create AIMP message from bridge message."""
@@ -234,6 +270,12 @@ class AimpMessageClient:
     def _parse_aimp_response(self, raw_response, message: BridgeToAgentMessage) -> Optional[AgentChatResponse]:
         """Parse AIMP response into AgentChatResponse format."""
         try:
+            # Large agent replies (> ~768 KB) arrive as {"aimp_chunk": ...} objects.
+            # Chat replies are far smaller, so the bridge doesn't reassemble them.
+            if isinstance(raw_response, dict) and "aimp_chunk" in raw_response:
+                logger.warning(f"AIMP: Dropping chunked agent reply part for message {message.message_id} (not supported)")
+                return None
+
             if isinstance(raw_response, list):
                 # Extract agent message content and intent flags from the response
                 agent_text = None

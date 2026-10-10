@@ -39,7 +39,7 @@ class AgentConfig(BaseModel):
     """Configuration for an AI agent."""
     agent_id: str = Field(..., description="Unique identifier for the AI agent")
     websocket_url: str = Field(..., description="WebSocket URL for the AI agent")
-    timeout_seconds: int = Field(default=30, description="Response timeout in seconds")
+    timeout_seconds: int = Field(default=180, description="Agent response timeout in seconds; on timeout the agent run is interrupted")
     behavior: str = Field(default="default", description="Agent behavior mode (for mock agents)")
     bot: Optional[str] = Field(default=None, description="Reference to bot name in CW_BRIDGE__bots__")
 
