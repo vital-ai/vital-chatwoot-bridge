@@ -105,7 +105,7 @@ def bridge_message() -> BridgeToAgentMessage:
     return BridgeToAgentMessage(
         message_id="m1",
         inbox_id="7",
-        inbox_name="CarlyAgent",
+        inbox_name="SupportAgent",
         conversation_id=42,
         content="hello",
         sender=MessageSender(id="c1", name="Pat", phone="+15555550100"),

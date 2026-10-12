@@ -17,8 +17,8 @@ Commands:
 
 Examples:
   python chatwoot_contact_manager.py list-contacts --page 1 --per-page 25
-  python chatwoot_contact_manager.py search-contacts --email "john@cardiff.co"
-  python chatwoot_contact_manager.py search-contacts --name "John" --query "cardiff"
+  python chatwoot_contact_manager.py search-contacts --email "john@example.co"
+  python chatwoot_contact_manager.py search-contacts --name "John" --query "example"
   python chatwoot_contact_manager.py count-contacts
   python chatwoot_contact_manager.py count-conversations
   python chatwoot_contact_manager.py get-contact --contact-id 1314 --include-conversations
@@ -671,8 +671,8 @@ def main():
         epilog="""
 Examples:
   %(prog)s list-contacts --page 1 --per-page 25
-  %(prog)s search-contacts --email "john@cardiff.co"
-  %(prog)s search-contacts --name "John" --query "cardiff"
+  %(prog)s search-contacts --email "john@example.co"
+  %(prog)s search-contacts --name "John" --query "example"
   %(prog)s count-contacts
   %(prog)s merge-contacts --primary-id 123 --secondary-id 456
         """
