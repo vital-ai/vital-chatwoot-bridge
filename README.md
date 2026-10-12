@@ -92,14 +92,6 @@ See [`aws_deploy/README.md`](aws_deploy/README.md) for ECS Fargate deployment.
 ```bash
 # Start with Docker Compose
 docker compose up --build
-
-# Run endpoint tests
-python -m test_endpoint_scripts.test_contacts
-python -m test_endpoint_scripts.test_conversations
-python -m test_endpoint_scripts.test_messages --case m-send-lm -v
-
-# List all test case IDs
-python -m test_endpoint_scripts.test_messages --list
 ```
 
 ### Configuration
