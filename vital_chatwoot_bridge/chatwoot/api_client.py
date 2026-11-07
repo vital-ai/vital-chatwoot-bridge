@@ -591,7 +591,10 @@ class ChatwootAPIClient:
         """
         try:
             # Try to access a valid Chatwoot API endpoint with account ID
-            url = f"{self.base_url}/api/v1/accounts/{self.settings.chatwoot_account_id}/conversations"
+            account = self.settings.chatwoot_account_id
+            if self.settings.chatwoot_account_mode == "multi" and self.settings.chatwoot_account_tokens:
+                account = sorted(self.settings.chatwoot_account_tokens)[0]      # an account this bridge has a token for
+            url = f"{self.base_url}/api/v1/accounts/{account}/conversations"
             
             response = await self._request("GET", url)
             

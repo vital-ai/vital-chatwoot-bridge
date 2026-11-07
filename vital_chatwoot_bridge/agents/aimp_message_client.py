@@ -29,6 +29,10 @@ from vital_chatwoot_bridge.utils.jwt_auth import create_jwt_manager_from_config
 
 logger = logging.getLogger(__name__)
 
+
+class AgentDeliveryError(RuntimeError):
+    """The agent was reached, but the interaction didn't end ok (timed out, closed with an error)."""
+
 # Initialize VitalSigns
 vs = VitalSigns()
 
@@ -81,7 +85,7 @@ class AimpMessageClient:
         
         try:
             responses = await self._send_aimp_message(
-                agent_url, message, timeout
+                agent_url, message, timeout, strict=strict
             )
             
             logger.info(f"✅ AIMP: Received {len(responses)} responses from agent")
@@ -97,9 +101,11 @@ class AimpMessageClient:
         self,
         agent_url: str,
         message: BridgeToAgentMessage,
-        timeout: int
+        timeout: int,
+        strict: bool = False,
     ) -> List[AgentChatResponse]:
-        """Send AIMP message to agent and collect responses."""
+        """Send AIMP message to agent and collect responses. With ``strict``, a failure to reach the agent, or an
+        interaction that didn't end ok, raises (AgentDeliveryError or the underlying error) instead of returning []."""
         handler = AimpMessageHandler()
         
         # Get JWT token if available
@@ -144,6 +150,8 @@ class AimpMessageClient:
             logger.info(f"✅ AIMP: WebSocket connection closed")
 
             self._log_interaction_result(result, message)
+            if strict and not result.ok:
+                raise AgentDeliveryError(f"interaction ended {result.status}")
 
             # Get responses from handler (kept even if the interaction didn't end ok:
             # anything the agent sent before an error or timeout is still delivered)
@@ -158,8 +166,13 @@ class AimpMessageClient:
 
             return responses
 
+        except AgentDeliveryError:
+            raise
+
         except AuthenticationError as e:
             logger.error(f"❌ AIMP: Agent rejected JWT at handshake: {e}")
+            if strict:
+                raise
             return []
 
         except ProtocolMismatchError as e:
@@ -167,10 +180,14 @@ class AimpMessageClient:
                 f"❌ AIMP: Agent at {agent_url} does not speak {SUBPROTOCOL} "
                 f"(needs vital-agent-container-sdk>=0.2.0): {e}"
             )
+            if strict:
+                raise
             return []
 
         except Exception as e:
             logger.error(f"❌ AIMP: Error in AIMP communication: {e}")
+            if strict:
+                raise
             return []
 
     def _log_interaction_result(self, result: InteractionResult, message: BridgeToAgentMessage) -> None:

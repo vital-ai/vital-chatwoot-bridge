@@ -472,3 +472,24 @@ async def test_the_client_scopes_calls_to_an_account_and_sends_the_key():
     assert seen[0][:3] == ("POST", "/api/v1/chatwoot/accounts/3/conversations/42/notes", "k-1")
     assert seen[1][:3] == ("POST", "/api/v1/chatwoot/accounts/3/conversations/42/replies", None)
     assert seen[2][1] == "/api/v1/routes/3/12/pause" and seen[2][3] == {"by": "pat", "reason": "misfiling"}
+
+
+async def test_an_unreachable_agent_is_a_failure_when_strict():
+    """The AIMP client swallows errors for its older callers; the delivery path asks for strict and must see them."""
+    import socket
+
+    from vital_chatwoot_bridge.agents.aimp_message_client import AimpMessageClient
+    from vital_chatwoot_bridge.core.models import BridgeToAgentMessage, MessageContext, MessageSender, ResponseMode
+    with socket.socket() as s:                          # a port nothing listens on
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    msg = BridgeToAgentMessage(message_id="m1", inbox_id="12", inbox_name="support",
+                               aimp_intent_type="http://vital.ai/ontology/vital-aimp#AIMPIntentType_CHAT",
+                               conversation_id=42, content="hi", sender=MessageSender(id="5", name="M", type="contact"),
+                               context=MessageContext(channel="Channel::Email", created_at=datetime.now(timezone.utc)),
+                               response_mode=ResponseMode.SYNC)
+    client = AimpMessageClient()
+    client.jwt_manager = None
+    assert await client.send_message_with_responses(f"ws://127.0.0.1:{port}/ws", msg, timeout=5) == []
+    with pytest.raises(Exception):
+        await client.send_message_with_responses(f"ws://127.0.0.1:{port}/ws", msg, timeout=5, strict=True)
