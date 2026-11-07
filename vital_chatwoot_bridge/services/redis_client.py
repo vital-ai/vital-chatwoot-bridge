@@ -1,9 +1,8 @@
 """
 Shared Redis (MemoryDB) client singleton.
 
-MemoryDB runs in cluster mode, so this is always Redis's cluster client, never a standalone ``Redis``
-(planning_vital_ai_api/07 §2a). Locally the vital-saas-memorydb container runs in cluster mode as well
-(vital-saas-api-app/dev/docker-compose.memorydb.yml). Configured from CW_BRIDGE__memorydb__* env vars.
+MemoryDB runs in cluster mode, so this is always Redis's cluster client, never a standalone ``Redis``. Locally, run
+Redis in cluster mode as well (one node holding every slot is enough). Configured from CW_BRIDGE__memorydb__* env vars.
 
 Usage:
     from vital_chatwoot_bridge.services.redis_client import get_redis, close_redis

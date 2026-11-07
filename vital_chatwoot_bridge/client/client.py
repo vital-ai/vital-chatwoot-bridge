@@ -11,9 +11,13 @@ from vital_chatwoot_bridge.client.conversations import ConversationsMixin
 from vital_chatwoot_bridge.client.messages import MessagesMixin
 from vital_chatwoot_bridge.client.agents import AgentsMixin
 from vital_chatwoot_bridge.client.inboxes import InboxesMixin
+from vital_chatwoot_bridge.client.routing import RoutingMixin
+from vital_chatwoot_bridge.client.support import SupportOpsMixin
 
 
 class ChatwootBridgeClient(
+    SupportOpsMixin,
+    RoutingMixin,
     ContactsMixin,
     ConversationsMixin,
     MessagesMixin,
@@ -39,6 +43,10 @@ class ChatwootBridgeClient(
         ) as client:
             contacts = await client.list_contacts(page=1)
             result = await client.post_message(direction="outbound", inbox_id=1, ...)
+
+        # multi-account mode: one view per Chatwoot account
+        acct = client.for_account(3)
+        await acct.add_note(42, "Translation: ...", idempotency_key="msg-123-note")
     """
 
     def __init__(

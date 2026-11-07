@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import logging
+import re
 from typing import Dict, Any, Optional, List, Sequence
 from datetime import datetime
 
@@ -49,6 +50,32 @@ def _get_management_semaphore() -> asyncio.Semaphore:
     return _management_semaphore
 
 
+_ACCOUNT_IN_PATH = re.compile(r"/api/v1/accounts/(\d+)(?:/|$)")
+
+
+class AttachmentStream:
+    """An attachment's response, open for streaming, with the client that owns it."""
+
+    def __init__(self, response: httpx.Response, http: httpx.AsyncClient):
+        self.response = response
+        self._http = http
+
+    @property
+    def status_code(self) -> int:
+        return self.response.status_code
+
+    @property
+    def headers(self) -> httpx.Headers:
+        return self.response.headers
+
+    def aiter_bytes(self):
+        return self.response.aiter_bytes()
+
+    async def aclose(self) -> None:
+        await self.response.aclose()
+        await self._http.aclose()
+
+
 class ChatwootAPIError(Exception):
     """Exception raised for Chatwoot API errors."""
     
@@ -88,6 +115,16 @@ class ChatwootAPIClient:
         )
         self.base_url = self.settings.chatwoot_base_url.rstrip('/')
 
+    def token_for(self, url: str) -> Optional[str]:
+        """The API token for the Chatwoot account in this URL: its own token when one is configured
+        (CW_BRIDGE__chatwoot__accounts__<id>__token, multi mode), otherwise chatwoot.user_access_token."""
+        m = _ACCOUNT_IN_PATH.search(url)
+        if m:
+            token = self.settings.chatwoot_account_tokens.get(int(m.group(1)))
+            if token:
+                return token
+        return None
+
     async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
         """Execute a request under the management concurrency bound, with retry.
 
@@ -96,6 +133,9 @@ class ChatwootAPIClient:
         chatwoot_management_routes, inbox_cache and the contact lookups — ran
         with no concurrency bound and no 429 handling whatsoever.
         """
+        token = self.token_for(url)
+        if token:
+            kwargs["headers"] = {**(kwargs.get("headers") or {}), "api_access_token": token}
         return await request_with_retry(
             self.client,
             method,
@@ -882,10 +922,10 @@ class ChatwootAPIClient:
         conversation_id: int,
         message_id: int
     ) -> Optional[Dict[str, Any]]:
-        """Get a single message by scanning conversation messages."""
+        """Get a single message: the page of the conversation's messages that ends at it (``before`` its id + 1)."""
         url = f"{self.base_url}/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages"
         try:
-            response = await self._request("GET", url)
+            response = await self._request("GET", url, params={"before": message_id + 1})
             if response.status_code == 200:
                 data = response.json()
                 for msg in data.get("payload", []):
@@ -1278,6 +1318,72 @@ class ChatwootAPIClient:
                 counts[conv_status] = 0
         counts["total"] = sum(counts.values())
         return counts
+
+    # ------------------------------------------------------------------
+    # Account-scoped calls used by the management API's conversation operations
+    # ------------------------------------------------------------------
+
+    async def account_call(self, account_id: int, method: str, path: str, **kwargs) -> Any:
+        """``{base}/api/v1/accounts/{account_id}/{path}``: the parsed JSON (or None), ChatwootAPIError on a 4xx/5xx."""
+        url = f"{self.base_url}/api/v1/accounts/{account_id}/{path.lstrip('/')}"
+        try:
+            response = await self._request(method, url, **kwargs)
+        except Exception as e:
+            raise ChatwootAPIError(f"Error calling Chatwoot {method} {path}: {type(e).__name__}") from e
+        if response.status_code >= 400:
+            raise ChatwootAPIError(f"Chatwoot {method} {path}: HTTP {response.status_code}",
+                                   status_code=response.status_code, response_data=self._safe_json(response))
+        return self._safe_json(response) if response.content else None
+
+    async def conversation_labels(self, account_id: int, conversation_id: int) -> List[str]:
+        data = await self.account_call(account_id, "GET", f"conversations/{conversation_id}/labels")
+        return list((data or {}).get("payload") or [])
+
+    async def set_conversation_labels(self, account_id: int, conversation_id: int, labels: List[str]) -> List[str]:
+        """Chatwoot's labels call replaces the whole set."""
+        data = await self.account_call(account_id, "POST", f"conversations/{conversation_id}/labels",
+                                       json={"labels": labels})
+        return list((data or {}).get("payload") or labels)
+
+    async def toggle_conversation_status(self, account_id: int, conversation_id: int, status: str,
+                                         snoozed_until: Optional[int] = None) -> Dict[str, Any]:
+        body: Dict[str, Any] = {"status": status}
+        if snoozed_until is not None:
+            body["snoozed_until"] = snoozed_until
+        return await self.account_call(account_id, "POST", f"conversations/{conversation_id}/toggle_status", json=body) or {}
+
+    async def assign_conversation(self, account_id: int, conversation_id: int, assignee_id: Optional[int] = None,
+                                  team_id: Optional[int] = None) -> Dict[str, Any]:
+        body: Dict[str, Any] = {}
+        if assignee_id is not None:
+            body["assignee_id"] = assignee_id
+        if team_id is not None:
+            body["team_id"] = team_id
+        return await self.account_call(account_id, "POST", f"conversations/{conversation_id}/assignments", json=body) or {}
+
+    async def open_attachment(self, url: str, max_redirects: int = 5) -> "AttachmentStream":
+        """A streamed GET of an attachment's URL; the caller closes it. Chatwoot's storage redirects are followed by
+        hand, so the API token goes only to Chatwoot's own host, never to the storage host it redirects to."""
+        chatwoot_host = httpx.URL(self.base_url).host
+        # Not self.client: its default headers carry the token. attachment_transport is for tests.
+        http = httpx.AsyncClient(timeout=httpx.Timeout(30.0), transport=getattr(self, "attachment_transport", None))
+        try:
+            for _ in range(max_redirects + 1):
+                target = httpx.URL(url)
+                token = (self.token_for(url) or self.settings.chatwoot_user_access_token) \
+                    if target.host == chatwoot_host else None
+                request = httpx.Request("GET", target, headers={"api_access_token": token} if token else {})
+                response = await http.send(request, stream=True, follow_redirects=False)
+                if response.is_redirect and response.headers.get("location"):
+                    url = str(target.join(response.headers["location"]))
+                    await response.aclose()
+                    continue
+                return AttachmentStream(response, http)
+        except BaseException:
+            await http.aclose()
+            raise
+        await http.aclose()
+        raise ChatwootAPIError("Too many redirects fetching an attachment", status_code=502)
 
     async def close(self):
         """Close the HTTP client."""

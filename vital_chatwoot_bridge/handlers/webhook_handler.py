@@ -24,8 +24,19 @@ from vital_chatwoot_bridge.chatwoot.api_client import ChatwootAPIClient
 from vital_chatwoot_bridge.services.api_inbox_service import APIInboxService
 from vital_chatwoot_bridge.chatwoot.client_models import LoopMessageOutboundRequest
 from vital_chatwoot_bridge.services.message_webhook import fire_message_event
+from vital_chatwoot_bridge.routing.deliveries import get_reporter
+from vital_chatwoot_bridge.routing.pauses import get_pause_store
+from vital_chatwoot_bridge.routing.routes import get_route_table
 
 logger = logging.getLogger(__name__)
+
+
+def _account_of(account: Any) -> Optional[int]:
+    """The Chatwoot account id from a webhook's ``account`` object."""
+    try:
+        return int((account or {}).get("id")) if (account or {}).get("id") is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 class WebhookHandler:
@@ -37,6 +48,7 @@ class WebhookHandler:
         self.settings = get_settings()
         self.api_inbox_service = APIInboxService()
         self._debouncer = None
+        self.unrouted = 0           # messages for an account or inbox with no route: counted, handed to no agent
 
     def set_debouncer(self, debouncer) -> None:
         """Attach the message debouncer (called from lifespan after init)."""
@@ -112,18 +124,30 @@ class WebhookHandler:
                 ).model_dump()
             
             logger.info(f"🎯 WEBHOOK: Extracted inbox_id: '{inbox_id}' from webhook payload")
-            
-            inbox_mapping = self.settings.get_inbox_mapping(inbox_id)
-            if not inbox_mapping:
-                logger.warning(f"No agent configured for inbox {inbox_id}")
-                # Debug: show available inbox mappings
-                available_inboxes = [mapping.inbox_id for mapping in self.settings.inbox_agent_mappings]
-                logger.warning(f"Available inbox mappings: {available_inboxes}")
+
+            account_id = _account_of(event_data.account)
+            route = get_route_table().get(account_id, inbox_id)
+            if not route:
+                logger.warning(f"No agent configured for account {account_id} inbox {inbox_id}")
+                self.unrouted += 1
+                await get_reporter().report(app=None, account_id=account_id or 0, inbox_id=inbox_id,
+                                            conversation_id=event_data.conversation.get("id"), message_id=event_data.id,
+                                            agent_id=None, status="unrouted", attempts=0)
                 return WebhookResponse(
                     status="ignored",
                     message=f"No agent configured for inbox {inbox_id}"
                 ).model_dump()
-            
+
+            paused = await get_pause_store().get(route.account_id, inbox_id)
+            if paused:
+                logger.info(f"⏸️  WEBHOOK: inbox {inbox_id} of account {route.account_id} is paused: message "
+                            f"{event_data.id} not handed to {route.agent.agent_id}")
+                await get_reporter().report(app=route.app, account_id=route.account_id, inbox_id=inbox_id,
+                                            conversation_id=event_data.conversation.get("id"), message_id=event_data.id,
+                                            agent_id=route.agent.agent_id, status="paused", attempts=0)
+                return WebhookResponse(status="ignored", message=f"Inbox {inbox_id} is paused").model_dump()
+
+            inbox_mapping = route.mapping()
             agent_config = inbox_mapping.agent_config
             logger.info(f"🎯 WEBHOOK: Selected agent '{agent_config.agent_id}' for inbox '{inbox_id}' ({inbox_mapping.inbox_name})")
 
@@ -137,6 +161,7 @@ class WebhookHandler:
                     full_payload={
                         "event_data": event_data.model_dump(),
                         "inbox_mapping_inbox_id": inbox_mapping.inbox_id,
+                        "account_id": route.account_id,
                     },
                 )
                 if result == "duplicate":
@@ -206,9 +231,9 @@ class WebhookHandler:
             )
             
             logger.info(f"Sending message {message_id} to agent {agent_config.agent_id}")
-            
-            # Send message to agent and get responses
-            responses = await self._send_message_to_agent(agent_config, bridge_message)
+
+            # Hand it to the agent, with the route's retries; the outcome is reported
+            responses = await self._deliver(route, bridge_message, event_data.conversation.get("id"), event_data.id)
             
             if responses:
                 account_id = event_data.account.get("id")
@@ -548,6 +573,35 @@ class WebhookHandler:
                 error_code="webwidget_processing_failed"
             ).model_dump()
     
+    async def _deliver(self, route, bridge_message: BridgeToAgentMessage, conversation_id, chatwoot_message_id) -> List[AgentChatResponse]:
+        """Hand a message to its route's agent, trying again up to the route's retries, and report the outcome. An
+        agent that answers with nothing has still received the message: that is delivered."""
+        agent = route.agent
+        reporter = get_reporter()
+        attempts, error = 0, None
+        for attempt in range(route.retries + 1):
+            attempts = attempt + 1
+            try:
+                responses = await self.websocket_client.send_message_with_responses(
+                    agent.websocket_url, bridge_message, timeout=agent.timeout_seconds,
+                    max_responses=getattr(agent, "max_responses", 5), strict=True)
+            except Exception as e:  # noqa: BLE001 - any failure to reach the agent is retried, then reported
+                error = f"{type(e).__name__}: {e}"
+                reporter.agent_result(agent.agent_id, agent.websocket_url, ok=False, error=error)
+                logger.warning(f"🔁 DELIVERY: attempt {attempts} of {route.retries + 1} to {agent.agent_id} failed: {error}")
+                if attempt < route.retries:
+                    await asyncio.sleep(min(2 ** attempt, 10))
+                continue
+            reporter.agent_result(agent.agent_id, agent.websocket_url, ok=True)
+            await reporter.report(app=route.app, account_id=route.account_id, inbox_id=route.inbox_id,
+                                  conversation_id=conversation_id, message_id=chatwoot_message_id,
+                                  agent_id=agent.agent_id, status="delivered", attempts=attempts)
+            return responses
+        await reporter.report(app=route.app, account_id=route.account_id, inbox_id=route.inbox_id,
+                              conversation_id=conversation_id, message_id=chatwoot_message_id, agent_id=agent.agent_id,
+                              status="failed", attempts=attempts, error=error)
+        return []
+
     async def _send_message_to_agent(self, agent_config, bridge_message: BridgeToAgentMessage) -> List[AgentChatResponse]:
         """Send message to agent and handle multiple responses."""
         try:
@@ -697,12 +751,13 @@ class WebhookHandler:
             event_dict = last_payload.get("event_data", {})
             inbox_id = meta.get("inbox_id", "")
 
-            # Rebuild the inbox mapping from config
-            inbox_mapping = self.settings.get_inbox_mapping(inbox_id)
-            if not inbox_mapping:
+            # Rebuild the inbox mapping from the routes
+            route = get_route_table().get(last_payload.get("account_id") or _account_of(event_dict.get("account", {})),
+                                          inbox_id)
+            if not route:
                 logger.error(f"⏱️  DEBOUNCE-DRAIN: No agent mapping for inbox {inbox_id}")
                 return
-
+            inbox_mapping = route.mapping()
             agent_config = inbox_mapping.agent_config
 
             # Extract context from the last message payload
@@ -769,7 +824,7 @@ class WebhookHandler:
                 f"({meta.get('message_count', '?')} msgs, {len(concatenated_content)} chars)"
             )
 
-            responses = await self._send_message_to_agent(agent_config, bridge_message)
+            responses = await self._deliver(route, bridge_message, conversation.get("id"), event_dict.get("id"))
 
             if responses:
                 account_id = account.get("id")

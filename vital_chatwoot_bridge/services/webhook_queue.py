@@ -88,7 +88,7 @@ class RedisQueue:
 
     async def _get_redis(self):
         if self._redis is None:
-            # Always the cluster client: MemoryDB is in cluster mode (planning_vital_ai_api/07 §2a).
+            # Always the cluster client: MemoryDB is in cluster mode.
             import os
 
             from vital_chatwoot_bridge.services.redis_client import cluster_client

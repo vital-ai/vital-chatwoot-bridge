@@ -61,7 +61,8 @@ class AimpMessageClient:
         agent_url: str,
         message: BridgeToAgentMessage,
         timeout: int = 30,
-        max_responses: int = 5
+        max_responses: int = 5,
+        strict: bool = False,
     ) -> List[AgentChatResponse]:
         """
         Connect to agent, send AIMP message, collect all responses, then disconnect.
@@ -88,6 +89,8 @@ class AimpMessageClient:
             
         except Exception as e:
             logger.error(f"❌ AIMP: Error communicating with agent: {e}")
+            if strict:                 # the caller retries and reports: it needs to know this failed
+                raise
             return []
     
     async def _send_aimp_message(

@@ -79,8 +79,8 @@ class MemoryDBConfig(BaseModel):
     ssl_cert_reqs: str = Field(default="none", description="SSL certificate verification mode")
     cluster: bool = Field(
         default=True,
-        description="Always true: MemoryDB is in cluster mode, so the bridge only uses the cluster client "
-                    "(planning_vital_ai_api/07 §2a). Locally, the vital-saas-memorydb container runs in cluster mode too",
+        description="Always true: MemoryDB is in cluster mode, so the bridge only uses the cluster client. "
+                    "Locally, run Redis in cluster mode too",
     )
     address_remap: str = Field(
         default="",
@@ -93,7 +93,7 @@ class MemoryDBConfig(BaseModel):
     def _cluster_only(cls, v: bool) -> bool:
         if not v:
             raise ValueError("memorydb.cluster=false is no longer supported: the bridge always uses the cluster client; "
-                             "run the local cluster-mode Redis (vital-saas-api-app/dev/docker-compose.memorydb.yml)")
+                             "run Redis in cluster mode locally as well")
         return v
 
 
@@ -192,6 +192,17 @@ class Config:
         self.chatwoot_base_url = _get(env_tree, "chatwoot", "base_url")
         self.chatwoot_user_access_token = _get(env_tree, "chatwoot", "user_access_token")
         self.chatwoot_account_id = _get(env_tree, "chatwoot", "account_id", default="1")
+        # single: one Chatwoot account (chatwoot.account_id), routes from CW_BRIDGE__inbox_agents__*; the default.
+        # multi: several accounts (one per app), routes from route files, account in every management path.
+        self.chatwoot_account_mode = _get(env_tree, "chatwoot", "account_mode", default="single").strip().lower()
+        if self.chatwoot_account_mode not in ("single", "multi"):
+            raise ValueError(f"CW_BRIDGE__chatwoot__account_mode must be single or multi, not {self.chatwoot_account_mode!r}")
+        # Per-account API tokens: CW_BRIDGE__chatwoot__accounts__<account_id>__token. An account without one uses
+        # chatwoot.user_access_token.
+        self.chatwoot_account_tokens: Dict[int, str] = {
+            int(acct): fields["token"] for acct, fields in (env_tree.get("chatwoot", {}).get("accounts", {}) or {}).items()
+            if isinstance(fields, dict) and str(acct).isdigit() and fields.get("token")
+        }
         self.enforce_webhook_signatures = _get_bool(env_tree, "chatwoot", "enforce_webhook_signatures", default=True)
         client_api = _get(env_tree, "chatwoot", "client_api_base_url")
         self.chatwoot_client_api_base_url = (
@@ -232,6 +243,23 @@ class Config:
         self.bots = self._parse_bots(env_tree.get("bots", {}))
         self.inbox_agent_mappings = self._parse_inbox_agents(env_tree.get("inbox_agents", {}))
         self.api_inboxes = self._parse_api_inboxes(env_tree.get("api_inboxes", {}))
+
+        # -- Routing (CW_BRIDGE__routing__*): inbox -> agent routes in multi mode, and the pause per inbox --
+        routing = env_tree.get("routing", {})
+        # Route files (YAML), comma-separated: files, or directories searched for chatwoot_bridge.yml / *.yml.
+        self.routing_files = [x.strip() for x in _get(routing, "files").split(",") if x.strip()]
+        # Prefix for the bridge's keys in Redis (pauses, idempotency keys).
+        self.routing_key_prefix = _get(routing, "key_prefix", default=f"cw_bridge:{self.environment}:")
+
+        # -- Delivery reports (CW_BRIDGE__deliveries__*): each inbound message's outcome, posted to a URL --
+        deliveries = env_tree.get("deliveries", {})
+        self.deliveries_report_url = _get(deliveries, "report_url")
+        self.deliveries_enabled = _get_bool(deliveries, "enabled", default=self.chatwoot_account_mode == "multi")
+        # The bridge's own client credentials for the report URL's token (Keycloak client credentials grant).
+        self.deliveries_token_url = _get(deliveries, "token_url")
+        self.deliveries_client_id = _get(deliveries, "client_id")
+        self.deliveries_client_secret = _get(deliveries, "client_secret")
+        self.idempotency_ttl_seconds = _get_int(deliveries, "idempotency_ttl_seconds", default=7 * 24 * 3600)
 
         # -- AWS (CW_BRIDGE__aws__*) --
         self.aws_access_key_id = _get(env_tree, "aws", "access_key_id")

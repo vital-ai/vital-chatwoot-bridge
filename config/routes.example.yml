@@ -1,0 +1,21 @@
+# A route file for multi-account mode (CW_BRIDGE__chatwoot__account_mode=multi): one per application, naming its
+# Chatwoot account and which agent handles each of its inboxes. Point CW_BRIDGE__routing__files at the file or its
+# directory. POST /api/v1/routes/reload reads the files again; a file that doesn't validate is refused, and the routes
+# already loaded stay. Pausing an inbox (POST /api/v1/routes/{account}/{inbox}/pause) is separate: a reload never
+# resumes it.
+app: example                         # a name for logs, status and delivery reports
+chatwoot_account_id: 3               # one application per account; needs CW_BRIDGE__chatwoot__accounts__3__token
+bot: example-bot                     # optional: a bot in CW_BRIDGE__bots__ whose token signs this account's webhooks
+inboxes:
+  - inbox_id: 12
+    name: support-email
+    retries: 2                       # extra attempts to hand a message to the agent before reporting it failed
+    agent:
+      agent_id: support-agent
+      websocket_url: ws://support-agent:8080/ws
+      timeout_seconds: 120
+  - inbox_id: 13
+    name: contact-form
+    agent:
+      agent_id: support-agent
+      websocket_url: ws://support-agent:8080/ws

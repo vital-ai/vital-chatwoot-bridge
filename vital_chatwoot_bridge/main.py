@@ -22,7 +22,11 @@ from vital_chatwoot_bridge.core.config import get_settings
 from vital_chatwoot_bridge.api.routes import health_router
 from vital_chatwoot_bridge.api.api_inbox_routes import api_inbox_router
 from vital_chatwoot_bridge.api.chatwoot_management_routes import router as chatwoot_management_router
+from vital_chatwoot_bridge.api.chatwoot_management_routes import ACCOUNT_PREFIX as MANAGEMENT_ACCOUNT_PREFIX
+from vital_chatwoot_bridge.api.chatwoot_management_routes import PREFIX as MANAGEMENT_PREFIX
 from vital_chatwoot_bridge.handlers.webhook_handler import WebhookHandler
+from vital_chatwoot_bridge.routing.routes import get_route_table
+from vital_chatwoot_bridge.api.routing_routes import router as routing_router
 from vital_chatwoot_bridge.chatwoot.api_client import get_chatwoot_client, close_chatwoot_client
 from vital_chatwoot_bridge.utils.webhook_security import verify_webhook_signature, log_webhook_headers
 
@@ -122,6 +126,13 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.warning(f"⚠️  MemoryDB init failed: {e}")
                 redis_client = None
+
+        # Routes (inbox -> agent). In multi mode a route file that doesn't validate stops the start here.
+        table = get_route_table()
+        if settings.chatwoot_account_mode == "multi" and not redis_client:
+            logger.warning("⚠️  multi mode without MemoryDB: pauses and idempotency keys are kept in memory only")
+        logger.info(f"🧭 Account mode {settings.chatwoot_account_mode}: {len(table.all())} route(s), "
+                    f"accounts {table.accounts()}")
 
         # Upgrade rate limiter to distributed (if MemoryDB available + pool exists)
         if redis_client and settings.rl_attentive_max_per_second > 0:
@@ -273,7 +284,9 @@ async def chatwoot_webhook(request: Request):
         
         webhook_secret = ""
         if inbox_id:
-            webhook_secret = settings.get_webhook_secret_for_inbox(inbox_id) or ""
+            account = payload.get("account") or {}
+            account_id = int(account["id"]) if str(account.get("id", "")).isdigit() else None
+            webhook_secret = get_route_table().webhook_secret(account_id, inbox_id) or ""
         
         if not webhook_secret and settings.enforce_webhook_signatures:
             logger.error(f"🔐 WEBHOOK: No bot token configured for inbox {inbox_id}")
@@ -339,7 +352,19 @@ async def get_status():
             status["contact_cache"] = get_contact_cache().stats()
         except Exception:
             pass
-        
+
+        # Routing and agents: counts and health only (agent URLs and pause reasons are on the authenticated /api/v1/routes)
+        from vital_chatwoot_bridge.routing.deliveries import get_reporter
+        from vital_chatwoot_bridge.routing.pauses import get_pause_store
+        table = get_route_table()
+        reporter = get_reporter()
+        status["routing"] = {"mode": table.mode, "routes": len(table.all()), "accounts": len(table.accounts()),
+                             "paused": len(await get_pause_store().all()),
+                             "unrouted": webhook_handler.unrouted if webhook_handler else 0}
+        status["agents"] = [{k: v for k, v in a.items() if k != "agent_url"} for a in reporter.agents()]
+        status["delivery_reports"] = {"enabled": reporter.enabled and bool(reporter.report_url),
+                                      "failed_to_post": reporter.reports_failed}
+
         return status
         
     except Exception as e:
@@ -350,7 +375,9 @@ async def get_status():
 # Include API routes
 app.include_router(health_router)
 app.include_router(api_inbox_router)
-app.include_router(chatwoot_management_router)
+app.include_router(chatwoot_management_router, prefix=MANAGEMENT_PREFIX)
+app.include_router(chatwoot_management_router, prefix=MANAGEMENT_ACCOUNT_PREFIX)    # the account in the path
+app.include_router(routing_router)
 
 
 def main():

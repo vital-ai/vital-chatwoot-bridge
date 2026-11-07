@@ -7,12 +7,13 @@ import asyncio
 import base64
 import logging
 import re
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from urllib.parse import unquote, urlparse
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from vital_chatwoot_bridge.core.config import get_settings
 from vital_chatwoot_bridge.core.auth_models import AuthenticatedUser
@@ -37,12 +38,45 @@ from vital_chatwoot_bridge.services.message_webhook import fire_message_event
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/chatwoot", tags=["Chatwoot Management"])
+# The account of the request being served, set by account_scope for every route below.
+_current_account: ContextVar[Optional[int]] = ContextVar("chatwoot_account", default=None)
+
+PREFIX = "/api/v1/chatwoot"
+ACCOUNT_PREFIX = "/api/v1/chatwoot/accounts/{account_id}"
+
+
+async def account_scope(request: Request) -> int:
+    """Which Chatwoot account a management call is for.
+
+    The router is mounted twice: at PREFIX (no account in the path) and at ACCOUNT_PREFIX.
+    - single mode: the configured account; an account in the path must be that one.
+    - multi mode: the account must be in the path, and must be one the routes name. The paths without it answer 400,
+      so nothing falls back to a default account.
+    """
+    from vital_chatwoot_bridge.routing.routes import get_route_table
+    settings = get_settings()
+    raw = request.path_params.get("account_id")
+    if raw is None:
+        if settings.chatwoot_account_mode == "multi":
+            raise HTTPException(status_code=400, detail=f"account required: use {ACCOUNT_PREFIX}/...")
+        account = int(settings.chatwoot_account_id)
+    else:
+        if not str(raw).isdigit():
+            raise HTTPException(status_code=404, detail="unknown account")
+        account = int(raw)
+        if account not in get_route_table().accounts():
+            raise HTTPException(status_code=404, detail="unknown account")
+    _current_account.set(account)
+    return account
+
+
+router = APIRouter(tags=["Chatwoot Management"], dependencies=[Depends(account_scope)])
 
 
 def _account_id() -> int:
-    """Get the configured Chatwoot account ID."""
-    return int(get_settings().chatwoot_account_id)
+    """The Chatwoot account of the current request (see account_scope)."""
+    current = _current_account.get()
+    return current if current is not None else int(get_settings().chatwoot_account_id)
 
 
 async def _resolve_attachments(
@@ -98,12 +132,19 @@ def _handle_api_error(e: ChatwootAPIError) -> HTTPException:
 async def list_contacts(
     page: int = 1,
     sort: Optional[str] = None,
+    email: Optional[str] = None,
+    vital_member_id: Optional[str] = None,
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """List contacts (paginated)."""
+    """List contacts (paginated). With ``email`` or ``vital_member_id`` (a contact custom attribute), only the contacts
+    that match it exactly, through Chatwoot's contact filter."""
     try:
         client = await get_chatwoot_client()
-        data = await client.list_contacts(_account_id(), page=page, sort=sort)
+        if email or vital_member_id:
+            key, value = ("email", email.strip().lower()) if email else ("vital_member_id", vital_member_id)
+            data = await client.filter_contacts(_account_id(), key, value, page=page)
+        else:
+            data = await client.list_contacts(_account_id(), page=page, sort=sort)
         payload = data.get("payload", [])
         meta_raw = data.get("meta", {})
         return PaginatedResponse(
@@ -1623,9 +1664,13 @@ async def list_inbound_messages(
     before: Optional[int] = None,
     limit: int = DEFAULT_INBOUND_LIMIT,
     status: Optional[str] = None,
+    since: Optional[datetime] = None,
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """List recent inbound (incoming) messages for an inbox, newest first.
+
+    ``since`` (ISO 8601) keeps only messages created at or after that time, and stops reading conversations whose
+    last activity is older: a periodic check reads only its window.
 
     Supports cursor-based pagination via the ``before`` parameter:
     pass the ``next_before`` value from a previous response to fetch
@@ -1658,6 +1703,7 @@ async def list_inbound_messages(
         # ConversationFinder. Key: pass status=all to include all statuses
         # (default is 'open' only).
         conv_status = status if status else "all"
+        since_ts = int(since.timestamp()) if since else None
 
         # Conversations come sorted by last_activity_at desc from Chatwoot.
         # Process sequentially: fetch messages for each conversation, fill a
@@ -1681,6 +1727,9 @@ async def list_inbound_messages(
             for conv in conv_payload:
                 cid = int(conv["id"])
                 conv_activity = conv.get("last_activity_at") or 0
+                if since_ts is not None and conv_activity < since_ts:
+                    done = True             # sorted by activity: every later conversation is older too
+                    break
 
                 # Stop: queue full and this conv's activity is older than
                 # the oldest message in our queue
@@ -1715,6 +1764,8 @@ async def list_inbound_messages(
                         continue
                     m["_conversation_id"] = cid
                     msg_ts = m.get("created_at", 0)
+                    if since_ts is not None and isinstance(msg_ts, (int, float)) and msg_ts < since_ts:
+                        continue
 
                     # Add to queue if not full, or replace oldest if newer
                     if len(inbound_messages) < target:
@@ -2110,3 +2161,187 @@ async def send_templated_email(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e),
         )
+
+
+# ── Conversation operations: notes, replies, labels, status, assignment, attachments ─────────────
+#
+# Available at both prefixes (see account_scope). Notes and replies take an Idempotency-Key header: a repeat with the
+# same key returns the first result and sends nothing again. The key is also sent to Chatwoot as the message's echo_id,
+# so a write whose response was lost can be matched afterwards.
+
+from fastapi import Header  # noqa: E402
+from fastapi.responses import StreamingResponse  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
+
+from vital_chatwoot_bridge.routing.idempotency import InProgress, get_idempotency_store  # noqa: E402
+
+MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+STATUSES = ("open", "pending", "resolved", "snoozed")
+
+
+class ConversationMessageIn(BaseModel):
+    content: str = Field(min_length=1, max_length=50_000)
+    content_attributes: Optional[Dict[str, Any]] = None
+
+
+class LabelsIn(BaseModel):
+    labels: List[str] = Field(min_length=1, max_length=20)
+
+
+class StatusIn(BaseModel):
+    status: str
+    snoozed_until: Optional[int] = Field(None, description="Unix time, with status snoozed")
+
+
+class AssigneeIn(BaseModel):
+    assignee_id: Optional[int] = None
+    team_id: Optional[int] = None
+
+
+def _label(name: str) -> str:
+    name = name.strip().lower()
+    if not re.fullmatch(r"[a-z0-9_-]{1,64}", name):
+        raise HTTPException(status_code=422, detail=f"invalid label {name!r}: lower case letters, digits, _ and - only")
+    return name
+
+
+async def _write_message(conversation_id: int, body: ConversationMessageIn, private: bool, key: Optional[str]) -> Dict:
+    account = _account_id()
+    payload: Dict[str, Any] = {"content": body.content, "message_type": "outgoing", "private": private}
+    if body.content_attributes:
+        payload["content_attributes"] = body.content_attributes
+    if key:
+        payload["echo_id"] = key
+
+    async def write():
+        client = await get_chatwoot_client()
+        return await client.send_message_raw(account, conversation_id, payload)
+
+    kind = "note" if private else "reply"
+    try:
+        result, replayed = await get_idempotency_store().run(f"{account}:{kind}", key, write)
+    except InProgress:
+        raise HTTPException(status_code=409, detail="a write with this Idempotency-Key is still in progress")
+    except ChatwootAPIError as e:
+        raise _handle_api_error(e)
+    return {"message": result, "replayed": replayed}
+
+
+@router.post("/conversations/{conversation_id}/notes", response_model=SingleResponse, status_code=201)
+async def add_note(conversation_id: int, body: ConversationMessageIn,
+                   idempotency_key: Optional[str] = Header(None, max_length=200),
+                   user: AuthenticatedUser = Depends(get_current_user)):
+    """A private note on the conversation: staff see it in Chatwoot, the contact never does."""
+    return SingleResponse(data=await _write_message(conversation_id, body, True, idempotency_key))
+
+
+@router.post("/conversations/{conversation_id}/replies", response_model=SingleResponse, status_code=201)
+async def add_reply(conversation_id: int, body: ConversationMessageIn,
+                    idempotency_key: Optional[str] = Header(None, max_length=200),
+                    user: AuthenticatedUser = Depends(get_current_user)):
+    """A reply to the contact, sent by the conversation's inbox (by email for an email inbox). The inbox and contact come
+    from the conversation. With an Idempotency-Key it's never sent twice."""
+    return SingleResponse(data=await _write_message(conversation_id, body, False, idempotency_key))
+
+
+@router.get("/conversations/{conversation_id}/labels", response_model=SingleResponse)
+async def get_labels(conversation_id: int, user: AuthenticatedUser = Depends(get_current_user)):
+    try:
+        client = await get_chatwoot_client()
+        return SingleResponse(data={"labels": await client.conversation_labels(_account_id(), conversation_id)})
+    except ChatwootAPIError as e:
+        raise _handle_api_error(e)
+
+
+@router.post("/conversations/{conversation_id}/labels", response_model=SingleResponse)
+async def add_labels(conversation_id: int, body: LabelsIn, user: AuthenticatedUser = Depends(get_current_user)):
+    """Adds labels, keeping the ones it has (Chatwoot's call replaces the whole set, so the bridge reads and merges)."""
+    wanted = [_label(x) for x in body.labels]
+    try:
+        client = await get_chatwoot_client()
+        account = _account_id()
+        have = await client.conversation_labels(account, conversation_id)
+        merged = have + [x for x in wanted if x not in have]
+        labels = merged if merged == have else await client.set_conversation_labels(account, conversation_id, merged)
+        return SingleResponse(data={"labels": labels})
+    except ChatwootAPIError as e:
+        raise _handle_api_error(e)
+
+
+@router.delete("/conversations/{conversation_id}/labels/{label}", response_model=SingleResponse)
+async def remove_label(conversation_id: int, label: str, user: AuthenticatedUser = Depends(get_current_user)):
+    name = _label(label)
+    try:
+        client = await get_chatwoot_client()
+        account = _account_id()
+        have = await client.conversation_labels(account, conversation_id)
+        if name not in have:
+            return SingleResponse(data={"labels": have})
+        labels = await client.set_conversation_labels(account, conversation_id, [x for x in have if x != name])
+        return SingleResponse(data={"labels": labels})
+    except ChatwootAPIError as e:
+        raise _handle_api_error(e)
+
+
+@router.post("/conversations/{conversation_id}/status", response_model=SingleResponse)
+async def set_status(conversation_id: int, body: StatusIn, user: AuthenticatedUser = Depends(get_current_user)):
+    """Open, pending, resolved or snoozed, through Chatwoot's toggle_status."""
+    if body.status not in STATUSES:
+        raise HTTPException(status_code=422, detail=f"status must be one of {', '.join(STATUSES)}")
+    try:
+        client = await get_chatwoot_client()
+        data = await client.toggle_conversation_status(_account_id(), conversation_id, body.status, body.snoozed_until)
+        return SingleResponse(data=data)
+    except ChatwootAPIError as e:
+        raise _handle_api_error(e)
+
+
+@router.post("/conversations/{conversation_id}/assignee", response_model=SingleResponse)
+async def set_assignee(conversation_id: int, body: AssigneeIn, user: AuthenticatedUser = Depends(get_current_user)):
+    """Assign the conversation to an agent (and/or a team), through Chatwoot's assignments."""
+    if body.assignee_id is None and body.team_id is None:
+        raise HTTPException(status_code=422, detail="give assignee_id or team_id")
+    try:
+        client = await get_chatwoot_client()
+        return SingleResponse(data=await client.assign_conversation(_account_id(), conversation_id, body.assignee_id,
+                                                                     body.team_id))
+    except ChatwootAPIError as e:
+        raise _handle_api_error(e)
+
+
+@router.get("/conversations/{conversation_id}/messages/{message_id}/attachments/{attachment_id}")
+async def get_attachment(conversation_id: int, message_id: int, attachment_id: int,
+                         user: AuthenticatedUser = Depends(get_current_user)):
+    """The attachment's bytes, streamed from Chatwoot's storage. Only if the attachment is on that message in that
+    conversation. The type is Chatwoot's; the caller decides how (and whether) to show it. 25 MB at most."""
+    try:
+        client = await get_chatwoot_client()
+        message = await client.get_message(_account_id(), conversation_id, message_id)
+    except ChatwootAPIError as e:
+        raise _handle_api_error(e)
+    attachment = next((a for a in (message or {}).get("attachments") or [] if a.get("id") == attachment_id), None)
+    if attachment is None or not attachment.get("data_url"):
+        raise HTTPException(status_code=404, detail="no such attachment")
+    if (attachment.get("file_size") or 0) > MAX_ATTACHMENT_BYTES:
+        raise HTTPException(status_code=413, detail="attachment too large")
+    stream = await client.open_attachment(attachment["data_url"])
+    if stream.status_code != 200:
+        await stream.aclose()
+        raise HTTPException(status_code=502, detail=f"Chatwoot's storage answered {stream.status_code}")
+
+    async def body():
+        sent = 0
+        try:
+            async for chunk in stream.aiter_bytes():
+                sent += len(chunk)
+                if sent > MAX_ATTACHMENT_BYTES:
+                    break
+                yield chunk
+        finally:
+            await stream.aclose()
+
+    headers = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
+    if stream.headers.get("content-length"):
+        headers["Content-Length"] = stream.headers["content-length"]
+    return StreamingResponse(body(), media_type=stream.headers.get("content-type", "application/octet-stream"),
+                             headers=headers)

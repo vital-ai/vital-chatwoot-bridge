@@ -3,6 +3,7 @@ Base HTTP client for the Chatwoot Bridge client library.
 Handles session management, authentication headers, and error mapping.
 """
 
+import copy
 import logging
 from typing import Any, Dict, Optional
 
@@ -19,6 +20,8 @@ from vital_chatwoot_bridge.client.exceptions import (
 
 logger = logging.getLogger(__name__)
 
+CHATWOOT_PREFIX = "/api/v1/chatwoot/"
+
 
 class BaseClient:
     """Async HTTP client with auth and error handling."""
@@ -33,15 +36,28 @@ class BaseClient:
         self.auth = auth
         self.timeout = timeout
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout))
+        self.account_id: Optional[int] = None
 
-    async def _headers(self) -> Dict[str, str]:
+    def for_account(self, account_id: int):
+        """The same client, for one Chatwoot account: every /api/v1/chatwoot/... call goes to
+        /api/v1/chatwoot/accounts/{account_id}/... (required when the bridge runs in multi-account mode). Shares the
+        HTTP connection and the token; closing either closes both."""
+        view = copy.copy(self)
+        view.account_id = int(account_id)
+        return view
+
+    async def _headers(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         token = await self.auth.get_token()
         return {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
+            **(extra or {}),
         }
 
     def _url(self, path: str) -> str:
+        if self.account_id is not None and path.startswith(CHATWOOT_PREFIX) and \
+                not path.startswith(f"{CHATWOOT_PREFIX}accounts/"):
+            path = f"{CHATWOOT_PREFIX}accounts/{self.account_id}/{path[len(CHATWOOT_PREFIX):]}"
         return f"{self.base_url}{path}"
 
     def _handle_response(self, resp: httpx.Response) -> Dict[str, Any]:
@@ -92,13 +108,23 @@ class BaseClient:
         )
         return self._handle_response(resp)
 
-    async def post(self, path: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def post(self, path: str, json: Optional[Dict[str, Any]] = None,
+                   headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """Make an authenticated POST request."""
-        headers = await self._headers()
         resp = await self._client.post(
-            self._url(path), headers=headers, json=json,
+            self._url(path), headers=await self._headers(headers), json=json,
         )
         return self._handle_response(resp)
+
+    async def stream(self, path: str) -> httpx.Response:
+        """An authenticated GET, streamed; the caller reads ``aiter_bytes()`` and closes it."""
+        request = self._client.build_request("GET", self._url(path), headers=await self._headers())
+        resp = await self._client.send(request, stream=True)
+        if resp.status_code >= 400:
+            await resp.aread()
+            await resp.aclose()
+            self._handle_response(resp)
+        return resp
 
     async def delete(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Make an authenticated DELETE request."""
