@@ -14,6 +14,7 @@ import json
 import logging
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -87,20 +88,16 @@ class RedisQueue:
 
     async def _get_redis(self):
         if self._redis is None:
-            try:
-                import redis.asyncio as aioredis
-            except ImportError:
-                raise ImportError(
-                    "redis package is required for Redis queue backend. "
-                    "Install it with: pip install redis>=5.0.0"
-                )
-            self._redis = aioredis.from_url(
-                self._redis_url,
-                decode_responses=True,
-            )
+            # Always the cluster client: MemoryDB is in cluster mode (planning_vital_ai_api/07 §2a).
+            import os
+
+            from vital_chatwoot_bridge.services.redis_client import cluster_client
+
+            self._redis = cluster_client(self._redis_url, remap=os.getenv("REDIS_DEV_ADDRESS_REMAP", ""))
             # Verify connectivity
             await self._redis.ping()
-            logger.info(f"📋 RedisQueue connected — url={self._redis_url}, key={self._queue_key}")
+            host = urlparse(self._redis_url).hostname          # never the URL: it carries the password
+            logger.info(f"📋 RedisQueue connected — host={host}, key={self._queue_key}")
         return self._redis
 
     async def enqueue(self, item: dict) -> bool:

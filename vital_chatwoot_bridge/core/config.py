@@ -10,7 +10,7 @@ import json
 import logging
 from typing import List, Optional, Dict, Any
 from functools import lru_cache
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from vital_chatwoot_bridge.utils.env_parser import parse_env_tree, coerce_dict
 from vital_chatwoot_bridge.email.models import (
@@ -77,7 +77,24 @@ class MemoryDBConfig(BaseModel):
     url: str = Field(..., description="MemoryDB connection URL (rediss://user:pass@host:port)")
     ssl: bool = Field(default=True, description="Enable TLS (MemoryDB always requires TLS)")
     ssl_cert_reqs: str = Field(default="none", description="SSL certificate verification mode")
-    cluster: bool = Field(default=True, description="Use cluster mode (MemoryDB); false for a standalone local Redis")
+    cluster: bool = Field(
+        default=True,
+        description="Always true: MemoryDB is in cluster mode, so the bridge only uses the cluster client "
+                    "(planning_vital_ai_api/07 §2a). Locally, the vital-saas-memorydb container runs in cluster mode too",
+    )
+    address_remap: str = Field(
+        default="",
+        description="Local development only: 'host.docker.internal=127.0.0.1' when the bridge runs on the host "
+                    "and the local cluster node announces host.docker.internal. Empty on AWS",
+    )
+
+    @field_validator("cluster")
+    @classmethod
+    def _cluster_only(cls, v: bool) -> bool:
+        if not v:
+            raise ValueError("memorydb.cluster=false is no longer supported: the bridge always uses the cluster client; "
+                             "run the local cluster-mode Redis (vital-saas-api-app/dev/docker-compose.memorydb.yml)")
+        return v
 
 
 class DebounceConfig(BaseModel):
@@ -457,7 +474,7 @@ class Config:
                 if flag in prepared and isinstance(prepared[flag], str):
                     prepared[flag] = prepared[flag].lower() == "true"
             config = MemoryDBConfig(**prepared)
-            logger.info(f"🗄️  CONFIG: MemoryDB configured — ssl={config.ssl}, cluster={config.cluster}")
+            logger.info(f"🗄️  CONFIG: MemoryDB configured — ssl={config.ssl}, cluster client")
             return config
         except Exception as e:
             logger.error(f"❌ CONFIG: Failed to parse MemoryDB config: {e}")

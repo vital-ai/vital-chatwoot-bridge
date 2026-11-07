@@ -1,9 +1,9 @@
 """
 Shared Redis (MemoryDB) client singleton.
 
-Provides a RedisCluster connection configured from CW_BRIDGE__memorydb__* env vars.
-Cluster mode is required because the MemoryDB cluster has cluster_enabled=1.
-Set ``CW_BRIDGE__memorydb__cluster=false`` to use a standalone Redis locally.
+MemoryDB runs in cluster mode, so this is always Redis's cluster client, never a standalone ``Redis``
+(planning_vital_ai_api/07 §2a). Locally the vital-saas-memorydb container runs in cluster mode as well
+(vital-saas-api-app/dev/docker-compose.memorydb.yml). Configured from CW_BRIDGE__memorydb__* env vars.
 
 Usage:
     from vital_chatwoot_bridge.services.redis_client import get_redis, close_redis
@@ -13,7 +13,7 @@ Usage:
 """
 
 import logging
-from typing import Optional, Union
+from typing import Callable, Optional, Tuple
 from urllib.parse import urlparse
 
 import redis.asyncio as aioredis
@@ -22,50 +22,41 @@ from vital_chatwoot_bridge.core.config import MemoryDBConfig
 
 logger = logging.getLogger(__name__)
 
-RedisClient = Union[aioredis.RedisCluster, aioredis.Redis]
+RedisClient = aioredis.RedisCluster
 
 _client: Optional[RedisClient] = None
 
 
-def init_redis(config: MemoryDBConfig) -> RedisClient:
-    """Initialize the global Redis client from MemoryDBConfig.
+def address_remap(spec: str) -> Optional[Callable[[Tuple[str, int]], Tuple[str, int]]]:
+    """``"a=b,c=d"``: announced host ``a`` is reached at ``b`` (local development only). Empty: none."""
+    pairs = dict(p.split("=", 1) for p in (x.strip() for x in spec.split(",")) if "=" in p)
+    if not pairs:
+        return None
+    return lambda addr: (pairs.get(addr[0], addr[0]), addr[1])
 
-    Call once during application lifespan startup.
-    """
-    global _client
 
-    parsed = urlparse(config.url)
-    if not config.cluster:
-        db = int(parsed.path.lstrip("/") or 0)  # redis://host:port/<db>
-        _client = aioredis.Redis(
-            host=parsed.hostname,
-            port=parsed.port or 6379,
-            db=db,
-            username=parsed.username,
-            password=parsed.password,
-            ssl=config.ssl,
-            ssl_cert_reqs=config.ssl_cert_reqs,
-            decode_responses=True,
-        )
-        logger.info(
-            f"🗄️  REDIS: Initialized standalone Redis — host={parsed.hostname}:{parsed.port or 6379}, "
-            f"db={db}, ssl={config.ssl}"
-        )
-        return _client
-
-    _client = aioredis.RedisCluster(
+def cluster_client(url: str, *, ssl: bool = False, ssl_cert_reqs: str = "none", remap: str = "",
+                   username: Optional[str] = None) -> RedisClient:
+    """A cluster client for ``url``. Every MemoryDB connection in the bridge is made here."""
+    parsed = urlparse(url)
+    return aioredis.RedisCluster(
         host=parsed.hostname,
         port=parsed.port or 6379,
-        username=parsed.username or "default",
+        username=username or parsed.username or "default",
         password=parsed.password,
-        ssl=config.ssl,
-        ssl_cert_reqs=config.ssl_cert_reqs,
+        ssl=ssl or parsed.scheme == "rediss",
+        ssl_cert_reqs=ssl_cert_reqs,
         decode_responses=True,
+        address_remap=address_remap(remap),
     )
-    logger.info(
-        f"🗄️  REDIS: Initialized RedisCluster — host={parsed.hostname}:{parsed.port}, "
-        f"ssl={config.ssl}"
-    )
+
+
+def init_redis(config: MemoryDBConfig) -> RedisClient:
+    """Initialize the global cluster client from MemoryDBConfig. Call once during application lifespan startup."""
+    global _client
+    _client = cluster_client(config.url, ssl=config.ssl, ssl_cert_reqs=config.ssl_cert_reqs, remap=config.address_remap)
+    parsed = urlparse(config.url)
+    logger.info(f"🗄️  REDIS: Initialized RedisCluster — host={parsed.hostname}:{parsed.port}, ssl={config.ssl}")
     return _client
 
 
