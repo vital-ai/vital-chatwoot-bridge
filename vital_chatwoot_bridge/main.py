@@ -13,10 +13,15 @@ from typing import Dict, Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-# Load .env file in development (ECS injects env vars directly)
+# Load .env file in development (ECS injects env vars directly). CW_BRIDGE_ENV_FILE names the file to load instead,
+# or "none" to load nothing: a launcher that sets every variable itself keeps a stray .env out.
 if os.getenv("CW_BRIDGE__app__environment") != "production":
     from dotenv import load_dotenv
-    load_dotenv()
+    _env_file = os.getenv("CW_BRIDGE_ENV_FILE")
+    if _env_file is None:
+        load_dotenv()
+    elif _env_file.lower() != "none":
+        load_dotenv(_env_file)
 
 from vital_chatwoot_bridge.core.config import get_settings
 from vital_chatwoot_bridge.api.routes import health_router
