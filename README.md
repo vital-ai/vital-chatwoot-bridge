@@ -115,6 +115,7 @@ In both modes:
 - **Pausing an inbox** (`POST /api/v1/routes/{account}/{inbox}/pause` with `{by, reason}`, then `/resume`): its messages still arrive in Chatwoot, but none is handed to its agent. The pause is kept in Redis, so it survives restarts, and reloading the routes never ends it.
 - **Retries and reports:** each message is handed to its agent with the route's `retries`. Its outcome (`delivered`, `failed`, `paused` or `unrouted`, with the attempts and the last error, never the text) is posted to `CW_BRIDGE__deliveries__report_url`. `POST /api/v1/deliveries/{message_id}/retry` with `{account_id, conversation_id}` hands one message to its agent again.
 - **`/status`** shows the routes, the paused inboxes and each agent's health (last success, last error, consecutive failures).
+- **What the agent receives:** with the message, where it is in Chatwoot (`chatwoot`: account, conversation, message, inbox, app) and the sender's name and address, so an agent can file it and write back to the conversation. A route file's `agent_auth` gives the token the app's agents expect (client credentials), sent inside each message.
 - **Callers** are checked by the token's `azp` against `CW_BRIDGE__keycloak__allowed_azps`.
 
 ### Conversation operations

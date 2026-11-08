@@ -24,6 +24,7 @@ from vital_chatwoot_bridge.chatwoot.api_client import ChatwootAPIClient
 from vital_chatwoot_bridge.services.api_inbox_service import APIInboxService
 from vital_chatwoot_bridge.chatwoot.client_models import LoopMessageOutboundRequest
 from vital_chatwoot_bridge.services.message_webhook import fire_message_event
+from vital_chatwoot_bridge.routing.agent_tokens import token_for
 from vital_chatwoot_bridge.routing.deliveries import get_reporter
 from vital_chatwoot_bridge.routing.pauses import get_pause_store
 from vital_chatwoot_bridge.routing.routes import get_route_table
@@ -213,6 +214,9 @@ class WebhookHandler:
                 inbox_name=inbox_mapping.inbox_name,
                 aimp_intent_type=inbox_mapping.aimp_intent_type,
                 conversation_id=event_data.conversation.get("id"),
+                chatwoot_account_id=route.account_id,
+                chatwoot_message_id=event_data.id,
+                app=route.app,
                 content=event_data.content,
                 subject=subject,
                 sender=MessageSender(
@@ -582,9 +586,11 @@ class WebhookHandler:
         for attempt in range(route.retries + 1):
             attempts = attempt + 1
             try:
+                token = await token_for(route.agent_auth)
                 responses = await self.websocket_client.send_message_with_responses(
                     agent.websocket_url, bridge_message, timeout=agent.timeout_seconds,
-                    max_responses=getattr(agent, "max_responses", 5), strict=True)
+                    max_responses=getattr(agent, "max_responses", 5), strict=True,
+                    **({"jwt_token": token, "jwt_mode": "payload"} if token else {}))
             except Exception as e:  # noqa: BLE001 - any failure to reach the agent is retried, then reported
                 error = f"{type(e).__name__}: {e}"
                 reporter.agent_result(agent.agent_id, agent.websocket_url, ok=False, error=error)
@@ -776,6 +782,9 @@ class WebhookHandler:
                 inbox_name=inbox_mapping.inbox_name,
                 aimp_intent_type=inbox_mapping.aimp_intent_type,
                 conversation_id=conversation.get("id"),
+                chatwoot_account_id=route.account_id,
+                chatwoot_message_id=event_dict.get("id"),
+                app=route.app,
                 content=concatenated_content,
                 subject=subject,
                 sender=MessageSender(

@@ -6,6 +6,10 @@
 app: example                         # a name for logs, status and delivery reports
 chatwoot_account_id: 3               # one application per account; needs CW_BRIDGE__chatwoot__accounts__3__token
 bot: example-bot                     # optional: a bot in CW_BRIDGE__bots__ whose token signs this account's webhooks
+agent_auth:                          # optional: the token this app's agents expect, sent inside each AIMP message
+  token_url: https://keycloak.example.com/realms/example/protocol/openid-connect/token
+  client_id: chatwoot-bridge
+  client_secret_env: EXAMPLE_AGENT_CLIENT_SECRET   # the environment variable holding its secret; a file without it is refused
 inboxes:
   - inbox_id: 12
     name: support-email

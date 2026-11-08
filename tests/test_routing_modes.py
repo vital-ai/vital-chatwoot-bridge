@@ -493,3 +493,46 @@ async def test_an_unreachable_agent_is_a_failure_when_strict():
     assert await client.send_message_with_responses(f"ws://127.0.0.1:{port}/ws", msg, timeout=5) == []
     with pytest.raises(Exception):
         await client.send_message_with_responses(f"ws://127.0.0.1:{port}/ws", msg, timeout=5, strict=True)
+
+
+def test_agent_auth_needs_its_secret(tmp_path, monkeypatch):
+    (tmp_path / "chatwoot_bridge.yml").write_text(ROUTES_A.replace(
+        "bot: alpha-bot\n", "bot: alpha-bot\nagent_auth: {token_url: 'http://kc/token', client_id: bridge, client_secret_env: ALPHA_AGENT_SECRET}\n"))
+    monkeypatch.delenv("ALPHA_AGENT_SECRET", raising=False)
+    with pytest.raises(RouteFileError, match="ALPHA_AGENT_SECRET"):
+        RouteTable(settings(files=[str(tmp_path)]))
+    monkeypatch.setenv("ALPHA_AGENT_SECRET", "s3cret")
+    route = RouteTable(settings(files=[str(tmp_path)])).get(3, "12")
+    assert route.agent_auth["client_id"] == "bridge"
+    assert route.describe()["agent_auth"] == {"token_url": "http://kc/token", "client_id": "bridge"}   # no secret name out
+
+
+async def test_the_agent_gets_the_routes_token_and_where_the_message_is(handler, multi, monkeypatch):
+    from vital_chatwoot_bridge.routing import agent_tokens
+    route = multi.table.get(3, "12")
+    object.__setattr__(route, "agent_auth", {"token_url": "http://kc/token", "client_id": "bridge", "client_secret_env": "X"})
+    seen = {}
+
+    async def token_for(auth):
+        return "route-token" if auth else None
+
+    monkeypatch.setattr("vital_chatwoot_bridge.handlers.webhook_handler.token_for", token_for)
+
+    class Agent(FakeAgent):
+        async def send_message_with_responses(self, url, message, timeout=30, max_responses=5, strict=False, **kw):
+            seen.update(kw, message=message)
+            return []
+
+    handler.websocket_client = Agent()
+    await handler.handle_webhook(event())
+    assert (seen["jwt_token"], seen["jwt_mode"]) == ("route-token", "payload")
+    m = seen["message"]
+    assert (m.chatwoot_account_id, m.conversation_id, m.chatwoot_message_id, m.app) == (3, 42, 900, "alpha")
+    from vital_chatwoot_bridge.agents.aimp_message_client import AimpMessageClient
+    client = AimpMessageClient()
+    aimp = await client._create_aimp_message(m)
+    content = json.loads(str(aimp[1].messageContentJSON))
+    assert content["chatwoot"] == {"account_id": 3, "conversation_id": 42, "message_id": 900, "inbox_id": "12",
+                                   "inbox_name": "support-email", "app": "alpha"}
+    assert content["sender_email"] == "m@example.com" and content["sender_name"] == "M"
+    agent_tokens.clear()

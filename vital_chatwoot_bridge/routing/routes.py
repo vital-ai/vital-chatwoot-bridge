@@ -14,6 +14,10 @@ A route file::
     app: example                    # a name for logs, status and delivery reports
     chatwoot_account_id: 3
     bot: example-bot                # optional: a bot in CW_BRIDGE__bots__, whose token signs this account's webhooks
+    agent_auth:                     # optional: the token this app's agents expect, sent inside each message
+      token_url: https://keycloak.example.com/realms/example/protocol/openid-connect/token
+      client_id: chatwoot-bridge
+      client_secret_env: EXAMPLE_AGENT_CLIENT_SECRET   # the environment variable holding the secret
     inboxes:
       - inbox_id: 12
         name: support-email
@@ -31,6 +35,7 @@ Pausing an inbox is separate runtime state (``routing/pauses.py``): reloading th
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,10 +70,17 @@ class InboxRouteSpec(BaseModel):
         return str(v)
 
 
+class AgentAuthSpec(BaseModel):
+    token_url: str
+    client_id: str
+    client_secret_env: str = Field(pattern=r"^[A-Z][A-Z0-9_]*$")
+
+
 class RouteFileSpec(BaseModel):
     app: str = Field(min_length=1, max_length=64)
     chatwoot_account_id: int = Field(gt=0)
     bot: Optional[str] = None
+    agent_auth: Optional[AgentAuthSpec] = None
     inboxes: List[InboxRouteSpec] = Field(min_length=1)
 
 
@@ -85,6 +97,7 @@ class Route:
     retries: int
     bot: Optional[str]
     source: str                      # "settings", or the route file's path
+    agent_auth: Optional[dict] = None   # token_url, client_id, client_secret_env
 
     @property
     def key(self) -> Tuple[int, str]:
@@ -98,7 +111,8 @@ class Route:
     def describe(self) -> dict:
         return {"account_id": self.account_id, "inbox_id": self.inbox_id, "inbox_name": self.inbox_name, "app": self.app,
                 "agent_id": self.agent.agent_id, "agent_url": self.agent.websocket_url,
-                "timeout_seconds": self.agent.timeout_seconds, "retries": self.retries, "source": self.source}
+                "timeout_seconds": self.agent.timeout_seconds, "retries": self.retries, "source": self.source,
+                "agent_auth": {k: v for k, v in (self.agent_auth or {}).items() if k != "client_secret_env"} or None}
 
 
 def _route_files(paths: List[str]) -> List[Path]:
@@ -124,6 +138,8 @@ def load_route_files(paths: List[str]) -> Dict[Tuple[int, str], Route]:
             spec = RouteFileSpec(**(yaml.safe_load(path.read_text(encoding="utf-8")) or {}))
         except (OSError, yaml.YAMLError, ValidationError, TypeError) as e:
             raise RouteFileError(f"{path}: {e}") from None
+        if spec.agent_auth and not os.environ.get(spec.agent_auth.client_secret_env):
+            raise RouteFileError(f"{path}: agent_auth's secret ({spec.agent_auth.client_secret_env}) isn't set")
         other = apps_by_account.setdefault(spec.chatwoot_account_id, spec.app)
         if other != spec.app:
             raise RouteFileError(f"{path}: Chatwoot account {spec.chatwoot_account_id} is already {other}'s")
@@ -133,7 +149,7 @@ def load_route_files(paths: List[str]) -> Dict[Tuple[int, str], Route]:
                 raise RouteFileError(f"{path}: inbox {inbox.inbox_id} of account {spec.chatwoot_account_id} is routed twice")
             routes[key] = Route(spec.chatwoot_account_id, inbox.inbox_id, inbox.name, spec.app, inbox.agent,
                                 inbox.aimp_intent_type, inbox.from_email, inbox.from_phone, inbox.retries, spec.bot,
-                                str(path))
+                                str(path), spec.agent_auth.model_dump() if spec.agent_auth else None)
     return routes
 
 

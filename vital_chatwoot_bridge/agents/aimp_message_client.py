@@ -67,6 +67,8 @@ class AimpMessageClient:
         timeout: int = 30,
         max_responses: int = 5,
         strict: bool = False,
+        jwt_token: Optional[str] = None,
+        jwt_mode: Optional[str] = None,
     ) -> List[AgentChatResponse]:
         """
         Connect to agent, send AIMP message, collect all responses, then disconnect.
@@ -85,7 +87,7 @@ class AimpMessageClient:
         
         try:
             responses = await self._send_aimp_message(
-                agent_url, message, timeout, strict=strict
+                agent_url, message, timeout, strict=strict, jwt_token=jwt_token, jwt_mode=jwt_mode
             )
             
             logger.info(f"✅ AIMP: Received {len(responses)} responses from agent")
@@ -103,14 +105,18 @@ class AimpMessageClient:
         message: BridgeToAgentMessage,
         timeout: int,
         strict: bool = False,
+        jwt_token: Optional[str] = None,
+        jwt_mode: Optional[str] = None,
     ) -> List[AgentChatResponse]:
         """Send AIMP message to agent and collect responses. With ``strict``, a failure to reach the agent, or an
         interaction that didn't end ok, raises (AgentDeliveryError or the underlying error) instead of returning []."""
         handler = AimpMessageHandler()
         
-        # Get JWT token if available
-        jwt_token = None
-        if self.jwt_manager:
+        # The route's own token (sent in the message, payload mode), or the bridge-wide one (header mode)
+        mode = (jwt_mode or "payload") if jwt_token else "header"
+        if jwt_token:
+            logger.info(f"🔑 AIMP: using the route's agent token ({jwt_mode or 'payload'} mode)")
+        elif self.jwt_manager:
             logger.info("🔑 AIMP: JWT manager configured, attempting to get token")
             jwt_token = self.jwt_manager.get_keycloak_token()
             if jwt_token:
@@ -122,7 +128,8 @@ class AimpMessageClient:
         else:
             logger.warning("🔑 AIMP: No JWT manager configured, proceeding without authentication")
         
-        client = VitalAgentContainerClient(base_url=agent_url, handler=handler, jwt_token=jwt_token)
+        client = VitalAgentContainerClient(base_url=agent_url, handler=handler, jwt_token=jwt_token,
+                                           jwt_mode=mode if jwt_token else "header")
 
         try:
             # Test health endpoint
@@ -264,6 +271,16 @@ class AimpMessageClient:
             "message_body": message.content,
             "channel": channel,
         }
+        # Where the message is in Chatwoot, so an agent can file it and write back to the conversation
+        content_json["chatwoot"] = {
+            "account_id": message.chatwoot_account_id, "conversation_id": message.conversation_id,
+            "message_id": message.chatwoot_message_id, "inbox_id": message.inbox_id, "inbox_name": message.inbox_name,
+            "app": message.app,
+        }
+        if message.sender.name:
+            content_json["sender_name"] = message.sender.name
+        if message.sender.email and channel != "sms":
+            content_json["sender_email"] = message.sender.email
 
         if channel == "sms":
             if message.sender.phone:

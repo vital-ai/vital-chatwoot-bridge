@@ -40,6 +40,9 @@ class BridgeToAgentMessage(BaseModel):
         description="AIMP intent type URI for this inbox",
     )
     conversation_id: int = Field(..., description="Chatwoot conversation ID")
+    chatwoot_account_id: Optional[int] = Field(None, description="Chatwoot account ID")
+    chatwoot_message_id: Optional[int] = Field(None, description="Chatwoot message ID (the latest, for a debounced batch)")
+    app: Optional[str] = Field(None, description="The route's application, in multi-account mode")
     content: str = Field(..., description="Message content from customer")
     subject: Optional[str] = Field(None, description="Email subject line (email channels only)")
     sender: MessageSender = Field(..., description="Message sender information")
