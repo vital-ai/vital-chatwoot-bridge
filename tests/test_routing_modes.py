@@ -536,3 +536,47 @@ async def test_the_agent_gets_the_routes_token_and_where_the_message_is(handler,
                                    "inbox_name": "support-email", "app": "alpha"}
     assert content["sender_email"] == "m@example.com" and content["sender_name"] == "M"
     agent_tokens.clear()
+
+
+
+# --- replies in an API inbox go out by email ----------------------------------------------------------------------
+
+def outgoing(inbox=8, message_id=950, channel="Channel::Api", private=False, email="m@example.com"):
+    return {"event": "message_created", "id": message_id, "content": "Your plan is active again.",
+            "created_at": "2026-11-08T10:00:00Z", "message_type": "outgoing", "private": private,
+            "sender": {"id": 1, "name": "Support", "type": "user"},
+            "conversation": {"id": 43, "inbox_id": inbox, "channel": channel,
+                             "meta": {"sender": {"id": 5, "email": email}}},
+            "account": {"id": 5}, "inbox": {"id": inbox}}
+
+
+async def test_a_reply_in_an_api_inbox_is_emailed_once_from_the_routes_address(handler, multi, monkeypatch):
+    (multi.files / "gamma").mkdir()
+    (multi.files / "gamma" / "chatwoot_bridge.yml").write_text("""
+app: gamma
+chatwoot_account_id: 5
+inboxes:
+  - {inbox_id: 8, name: form, from_email: help@gamma.test, reply_subject: Your message to gamma,
+     agent: {agent_id: gamma-support, websocket_url: "ws://gamma-agent/ws"}}
+""")
+    routes.set_route_table(RouteTable(settings(files=[str(multi.files)], tokens={3: "t3", 4: "t4", 5: "t5"})))
+    from vital_chatwoot_bridge.email.models import MailgunConfig
+    from vital_chatwoot_bridge.integrations import mailgun_client
+    sent = []
+
+    async def send_email(self, **kw):
+        sent.append(kw)
+        return {"id": "<1@gamma.test>"}
+
+    monkeypatch.setattr(mailgun_client.MailgunClient, "send_email", send_email)
+    monkeypatch.setattr(handler.settings, "mailgun", MailgunConfig(api_key="k", domain="gamma.test"))
+    out = await handler.handle_webhook(outgoing())
+    assert out["message"] == "reply emailed"
+    assert sent == [{"to": "m@example.com", "subject": "Your message to gamma", "text": "Your plan is active again.",
+                     "from_email": "help@gamma.test", "reply_to": "help@gamma.test"}]
+    await handler.handle_webhook(outgoing())                                        # Chatwoot sent the event again
+    assert len(sent) == 1
+    for other in (outgoing(private=True), outgoing(inbox=9, message_id=951), outgoing(channel="Channel::Email", message_id=952)):
+        assert (await handler.handle_webhook(other))["message"] != "reply emailed"   # a note, no route, not an API inbox
+    assert len(sent) == 1 and handler.websocket_client.calls == []                  # and no agent is ever asked
+    assert (await handler.handle_webhook(outgoing(message_id=953, email=None)))["message"] == "reply not emailed"

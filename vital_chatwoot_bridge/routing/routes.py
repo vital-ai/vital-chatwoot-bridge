@@ -28,6 +28,10 @@ A route file::
           timeout_seconds: 120
         aimp_intent_type: http://vital.ai/ontology/vital-aimp#AIMPIntentType_CHAT   # optional
         from_email: support@example.com                                              # optional
+        reply_subject: Your message to support    # optional: an API inbox's replies are emailed from from_email
+
+In an API inbox (a contact form, say) a reply reaches the contact only if the route has ``from_email``: then each public
+reply is also emailed to the contact from that address, once (the message id is the idempotency key).
 
 Pausing an inbox is separate runtime state (``routing/pauses.py``): reloading the routes never changes it.
 """
@@ -63,6 +67,7 @@ class InboxRouteSpec(BaseModel):
     aimp_intent_type: str = DEFAULT_INTENT
     from_email: Optional[str] = None
     from_phone: Optional[str] = None
+    reply_subject: Optional[str] = Field(default=None, max_length=200)
 
     @field_validator("inbox_id", mode="before")
     @classmethod
@@ -98,6 +103,7 @@ class Route:
     bot: Optional[str]
     source: str                      # "settings", or the route file's path
     agent_auth: Optional[dict] = None   # token_url, client_id, client_secret_env
+    reply_subject: Optional[str] = None
 
     @property
     def key(self) -> Tuple[int, str]:
@@ -149,7 +155,7 @@ def load_route_files(paths: List[str]) -> Dict[Tuple[int, str], Route]:
                 raise RouteFileError(f"{path}: inbox {inbox.inbox_id} of account {spec.chatwoot_account_id} is routed twice")
             routes[key] = Route(spec.chatwoot_account_id, inbox.inbox_id, inbox.name, spec.app, inbox.agent,
                                 inbox.aimp_intent_type, inbox.from_email, inbox.from_phone, inbox.retries, spec.bot,
-                                str(path), spec.agent_auth.model_dump() if spec.agent_auth else None)
+                                str(path), spec.agent_auth.model_dump() if spec.agent_auth else None, inbox.reply_subject)
     return routes
 
 

@@ -19,7 +19,9 @@ inboxes:
       websocket_url: ws://support-agent:8080/ws
       timeout_seconds: 120
   - inbox_id: 13
-    name: contact-form
+    name: contact-form               # an API inbox: it has no channel back to the contact, so with from_email each public
+    from_email: support@example.com  # reply is also emailed to the contact (once; needs CW_BRIDGE__mailgun__*)
+    reply_subject: Your message to support    # optional; the default names the inbox
     agent:
       agent_id: support-agent
       websocket_url: ws://support-agent:8080/ws

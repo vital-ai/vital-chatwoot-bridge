@@ -93,6 +93,12 @@ class WebhookHandler:
             # Main webhook only handles inbound messages for agent processing
             # Outbound messages are handled by separate endpoint: /api/v1/inboxes/loopmessage/messages/outbound
             
+            # A public reply in an API inbox whose route has from_email is emailed to the contact as well
+            if message_type_str == "outgoing" and not event_data.private:
+                emailed = await self._email_api_inbox_reply(event_data)
+                if emailed is not None:
+                    return emailed
+
             # Check if this is an incoming message (from customer)
             if message_type_str != "incoming":
                 logger.debug(f"Ignoring message type {message_type_str} ({event_data.message_type}) for message {event_data.id}")
@@ -902,6 +908,43 @@ class WebhookHandler:
             if "email" in mtypes:
                 return "email"
         return "web"
+
+    async def _email_api_inbox_reply(self, event_data: ChatwootWebhookEvent) -> Optional[Dict[str, Any]]:
+        """An API inbox (a contact form, say) has no channel back to the contact, so a public reply there is emailed
+        from the route's ``from_email``, once per message. None when this message isn't such a reply."""
+        conversation = event_data.conversation or {}
+        if conversation.get("channel") != "Channel::Api" or not (event_data.content or "").strip():
+            return None
+        inbox_id = str(conversation.get("inbox_id") or (event_data.inbox or {}).get("id") or "")
+        route = get_route_table().get(_account_of(event_data.account), inbox_id)
+        mailgun = self.settings.mailgun
+        if route is None or not route.from_email:
+            return None
+        contact = ((conversation.get("meta") or {}).get("sender") or {})
+        to = contact.get("email")
+        if not to or mailgun is None:
+            logger.warning(f"reply {event_data.id} in API inbox {inbox_id} not emailed: "
+                           f"{'no address for the contact' if not to else 'Mailgun is not configured'}")
+            return WebhookResponse(status="ignored", message="reply not emailed").model_dump()
+        mail_subject = (conversation.get("additional_attributes") or {}).get("mail_subject")
+        subject = f"Re: {mail_subject}" if mail_subject else (route.reply_subject or f"Re: your message to {route.inbox_name}")
+
+        async def send():
+            from vital_chatwoot_bridge.integrations.mailgun_client import MailgunClient
+            async with MailgunClient(mailgun) as mg:
+                return await mg.send_email(to=to, subject=subject, text=event_data.content, from_email=route.from_email,
+                                           reply_to=route.from_email)
+
+        from vital_chatwoot_bridge.routing.idempotency import InProgress, get_idempotency_store
+        try:
+            _, replayed = await get_idempotency_store().run(f"{route.account_id}:emailed", str(event_data.id), send)
+        except InProgress:
+            return WebhookResponse(status="ignored", message="already being emailed").model_dump()
+        except Exception as e:
+            logger.error(f"reply {event_data.id} in API inbox {inbox_id}: email failed ({type(e).__name__})")
+            return WebhookResponse(status="error", message="reply not emailed").model_dump()
+        logger.info(f"reply {event_data.id} in API inbox {inbox_id} emailed{' (already)' if replayed else ''}")
+        return WebhookResponse(status="success", message="reply emailed").model_dump()
 
     def _normalize_message_type(self, message_type) -> str:
         """Convert integer message_type to string format."""
