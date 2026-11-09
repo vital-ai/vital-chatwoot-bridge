@@ -22,6 +22,7 @@
         { "name": "CW_BRIDGE__app__host", "value": "0.0.0.0" },
         { "name": "CW_BRIDGE__app__debug", "value": "false" },
         { "name": "CW_BRIDGE__app__environment", "value": "production" },
+        { "name": "CW_BRIDGE__mailgun__reply_subject", "value": "Reply from Cardiff" },
         { "name": "CW_BRIDGE__app__log_level", "value": "INFO" },
         { "name": "CW_BRIDGE__app__log_format", "value": "json" },
         { "name": "CW_BRIDGE__chatwoot__enforce_webhook_signatures", "value": "true" },

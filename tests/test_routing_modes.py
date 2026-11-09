@@ -580,3 +580,31 @@ inboxes:
         assert (await handler.handle_webhook(other))["message"] != "reply emailed"   # a note, no route, not an API inbox
     assert len(sent) == 1 and handler.websocket_client.calls == []                  # and no agent is ever asked
     assert (await handler.handle_webhook(outgoing(message_id=953, email=None)))["message"] == "reply not emailed"
+
+
+async def test_an_emailed_reply_without_a_subject_uses_the_configured_one(handler, monkeypatch):
+    from vital_chatwoot_bridge.email.models import MailgunConfig
+    from vital_chatwoot_bridge.integrations import mailgun_client
+    sent = []
+
+    async def send_email(self, **kw):
+        sent.append(kw)
+        return {"id": "<1@x.test>"}
+
+    async def close(self):
+        return None
+
+    async def note(*a, **k):
+        return {"id": 1}
+
+    monkeypatch.setattr(mailgun_client.MailgunClient, "send_email", send_email)
+    monkeypatch.setattr(mailgun_client.MailgunClient, "close", close, raising=False)
+    monkeypatch.setattr(handler, "_post_response_to_chatwoot", note, raising=False)
+    monkeypatch.setattr(handler.settings, "mailgun", MailgunConfig(api_key="k", domain="x.test"))
+    await handler._send_email_via_mailgun(3, 42, "Hello", "m@example.com")
+    assert sent[-1]["subject"] == "Re: your message"
+    monkeypatch.setattr(handler.settings, "mailgun", MailgunConfig(api_key="k", domain="x.test", reply_subject="Reply from us"))
+    await handler._send_email_via_mailgun(3, 42, "Hello", "m@example.com")
+    assert sent[-1]["subject"] == "Reply from us"
+    await handler._send_email_via_mailgun(3, 42, "Hello", "m@example.com", subject="Restore")
+    assert sent[-1]["subject"] == "Re: Restore"

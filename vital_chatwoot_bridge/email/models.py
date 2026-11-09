@@ -12,6 +12,8 @@ class MailgunConfig(BaseModel):
     domain: str = Field(..., description="Mailgun sending domain (e.g. mg.example.com)")
     from_email: str = Field(default="", description="Default sender address")
     base_url: str = Field(default="https://api.mailgun.net/v3", description="Mailgun API base URL")
+    reply_subject: str = Field(default="Re: your message",
+                               description="Subject of an agent's emailed reply when the member's message had none")
 
 
 class EmailTemplateDef(BaseModel):

@@ -659,7 +659,7 @@ class WebhookHandler:
                 "</body>\n</html>"
             )
 
-            reply_subject = f"Re: {subject}" if subject else "Reply from Cardiff"
+            reply_subject = f"Re: {subject}" if subject else self.settings.mailgun.reply_subject
 
             mg_client = MailgunClient(self.settings.mailgun)
             try:
