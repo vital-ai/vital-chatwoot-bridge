@@ -291,7 +291,7 @@ class AimpMessageClient:
             if message.subject:
                 content_json["subject"] = message.subject
 
-        # assigned_personality — only for named agent inboxes (e.g. "CarlyAgent" → "carly")
+        # assigned_personality — only for named agent inboxes (e.g. "SupportAgent" → "support")
         if "agent" in message.inbox_name.lower():
             personality = message.inbox_name.lower().replace("agent", "").strip()
             if personality:

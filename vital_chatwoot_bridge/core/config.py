@@ -47,12 +47,12 @@ class AgentConfig(BaseModel):
 class InboxMapping(BaseModel):
     """Mapping between Chatwoot inbox and AI agent."""
     inbox_id: str = Field(..., description="Chatwoot inbox identifier as string")
-    inbox_name: str = Field(default="", description="Human-readable inbox name (e.g. CarlyAgent)")
+    inbox_name: str = Field(default="", description="Human-readable inbox name (e.g. SupportAgent)")
     aimp_intent_type: str = Field(
         default="http://vital.ai/ontology/vital-aimp#AIMPIntentType_CHAT",
         description="AIMP intent type URI sent to the agent for this inbox",
     )
-    from_email: Optional[str] = Field(default=None, description="Mailgun sender address for this inbox (e.g. carly@mg.cardiff.co)")
+    from_email: Optional[str] = Field(default=None, description="Mailgun sender address for this inbox (e.g. support@mg.example.com)")
     from_phone: Optional[str] = Field(default=None, description="Twilio sender phone number in E.164 format (e.g. +18887894154)")
     agent_config: AgentConfig = Field(..., description="AI agent configuration")
 
