@@ -7,6 +7,9 @@ Deployment configuration for the Vital Chatwoot Bridge service on ECS Fargate.
 - `task-definition.json` — ECS task definition with Secrets Manager integration
 - `service-definition.json` — ECS service with ALB, circuit breaker, and ECS Exec
 
+These two JSON files aren't in the repository (`.gitignore`): they hold an operator's own settings. Write your own from the
+outline below and keep them beside this README.
+
 ## Prerequisites
 
 1. AWS CLI configured with appropriate permissions

@@ -238,3 +238,6 @@ test_inbound_scripts/
 
 # Local-only scripts with real customer/lead data; never commit
 local_scripts/
+
+# Deployment definitions with an operator's own settings: kept locally, never in this public repo
+aws_deploy/*.json
