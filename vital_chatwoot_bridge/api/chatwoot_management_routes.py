@@ -651,6 +651,7 @@ async def post_message(
             conversation_id = await _resolve_conversation(
                 client, account_id, inbox_id, contact_id, body.conversation_mode,
                 source_id=contact_phone,
+                subject=body.subject if body.direction == "inbound" else None,
             )
 
         # -----------------------------------------------------------------
@@ -2007,6 +2008,7 @@ async def _resolve_conversation(
     client, account_id: int, inbox_id: int, contact_id: int,
     mode: str = "reuse_newest",
     source_id: str = None,
+    subject: Optional[str] = None,
 ) -> int:
     """Find or create a conversation based on mode.
 
@@ -2014,6 +2016,9 @@ async def _resolve_conversation(
         reuse_newest — reuse the most recently active open/pending conversation
                        on this inbox, or create one if none exist.
         create_new   — always create a new conversation.
+
+    A new conversation keeps ``subject`` as its ``mail_subject``, as an email conversation does: replies emailed from an
+    API inbox (a contact form) then go out as "Re: <subject>", in the contact's own words or language.
     """
     if mode == "reuse_newest":
         try:
@@ -2032,6 +2037,8 @@ async def _resolve_conversation(
         "contact_id": contact_id,
         "source_id": source_id or f"contact_{contact_id}",
     }
+    if subject and subject.strip():
+        conv_payload["additional_attributes"] = {"mail_subject": subject.strip()[:200]}
     result = await client.create_conversation_raw(account_id, conv_payload)
     conv_id = result.get("id") or result.get("payload", {}).get("id")
     if not conv_id:

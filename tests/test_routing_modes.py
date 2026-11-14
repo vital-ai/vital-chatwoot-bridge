@@ -608,3 +608,19 @@ async def test_an_emailed_reply_without_a_subject_uses_the_configured_one(handle
     assert sent[-1]["subject"] == "Reply from us"
     await handler._send_email_via_mailgun(3, 42, "Hello", "m@example.com", subject="Restore")
     assert sent[-1]["subject"] == "Re: Restore"
+
+
+async def test_a_new_inbound_conversation_keeps_its_subject_for_the_emailed_replies():
+    """A contact form's message opens its conversation with the subject as ``mail_subject``, so the replies emailed
+    from the API inbox answer it ("Re: <subject>") rather than the route's fixed subject."""
+    made = []
+
+    class Client:
+        async def create_conversation_raw(self, account, payload):
+            made.append(payload)
+            return {"id": 77}
+
+    assert await mgmt._resolve_conversation(Client(), 3, 8, 5, "create_new", subject="  Tu mensaje a soporte ") == 77
+    assert made[-1]["additional_attributes"] == {"mail_subject": "Tu mensaje a soporte"}
+    await mgmt._resolve_conversation(Client(), 3, 8, 5, "create_new")
+    assert "additional_attributes" not in made[-1]

@@ -133,7 +133,7 @@ class PostMessageRequest(BaseModel):
         description="'reuse_newest' (default): reuse most recent open conversation; 'create_new': always create a new conversation",
     )
     suppress_delivery: bool = Field(default=False, description="Log only, do not dispatch (outbound only)")
-    subject: Optional[str] = Field(None, description="Email subject line (email inboxes only)")
+    subject: Optional[str] = Field(None, description="Email subject line (email inboxes); inbound into a new conversation, also the subject its emailed replies answer")
     to_emails: Optional[str] = Field(None, description="Explicit email recipients, comma-separated (outbound only)")
     cc_emails: Optional[str] = Field(None, description="CC recipients, comma-separated (outbound only)")
     bcc_emails: Optional[str] = Field(None, description="BCC recipients, comma-separated (outbound only)")
