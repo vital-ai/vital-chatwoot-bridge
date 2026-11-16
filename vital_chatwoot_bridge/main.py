@@ -63,7 +63,8 @@ async def lifespan(app: FastAPI):
         logger.warning("   Inbound messages are NOT written to Chatwoot.")
         logger.warning("   Mailgun, Gmail, Zoom SMS and LoopMessage sends are skipped.")
         logger.warning(banner)
-    
+
+    debouncer = None        # set before anything can fail, so shutdown doesn't hide a start-up error behind its own
     try:
         # Initialize Chatwoot API client
         chatwoot_client = await get_chatwoot_client()
