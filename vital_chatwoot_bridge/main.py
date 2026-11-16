@@ -213,33 +213,24 @@ async def lifespan(app: FastAPI):
         
     finally:
         logger.info("Shutting down Vital Chatwoot Bridge...")
-        
-        # Stop debouncer
-        if debouncer is not None:
-            await debouncer.stop()
-        
-        # Close Redis
-        try:
-            from vital_chatwoot_bridge.services.redis_client import close_redis
-            await close_redis()
-        except Exception:
-            pass
-        
-        # Close message webhook client
+        from vital_chatwoot_bridge.services.redis_client import close_redis
         from vital_chatwoot_bridge.services.message_webhook import get_message_webhook as _gmw
-        _mw = _gmw()
-        if _mw is not None:
-            await _mw.close()
-
-        # Stop webhook worker pool
         from vital_chatwoot_bridge.services.webhook_queue import get_worker_pool as _gwp
-        _pool = _gwp()
-        if _pool is not None:
-            await _pool.stop()
-        
-        # Cleanup
-        await close_chatwoot_client()
-        
+
+        # Each step on its own: one that fails is logged and the rest still run, and a failed start keeps its own error.
+        _mw, _pool = _gmw(), _gwp()
+        for name, step in (("debouncer", debouncer.stop if debouncer is not None else None),
+                           ("MemoryDB", close_redis),
+                           ("message webhook", _mw.close if _mw is not None else None),
+                           ("worker pool", _pool.stop if _pool is not None else None),
+                           ("Chatwoot client", close_chatwoot_client)):
+            if step is None:
+                continue
+            try:
+                await step()
+            except Exception as e:
+                logger.warning(f"⚠️  Shutdown: {name} didn't close cleanly: {e}")
+
         logger.info("✅ Vital Chatwoot Bridge shutdown complete")
 
 
